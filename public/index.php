@@ -775,8 +775,11 @@ $defaultView    = $settings['default_view']   ?? $settingsDefault['default_view'
             <input type="text" name="patient_name" id="patient_name" class="form-control" required>
           </div>
           <div class="col-md-4">
-            <label class="form-label">Үйлчилгээ <span class="text-warning fw-semibold">*</span></label>
-            <input type="text" name="service_name" id="service_name" class="form-control" placeholder="Жишээ: Botox, Filler гэх мэт" required>
+            <label class="form-label">Эмчилгээний төрөл <span class="text-warning fw-semibold">*</span></label>
+            <select name="treatment_id" id="treatment_id" class="form-select" required>
+              <option value="">Сонгох...</option>
+            </select>
+            <small class="text-muted">Сануулга, дараах эмчилгээ SMS илгээнэ</small>
           </div>
 
           <div class="col-md-4">

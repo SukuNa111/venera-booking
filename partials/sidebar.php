@@ -163,6 +163,7 @@ main.full { margin-left: 0; }
     <?php if (in_array($role, ['admin', 'reception'])): ?>
       <a class="nav-link <?= active('bookings.php') ?>" href="<?= app_url('bookings.php') ?>">📋 Захиалгууд</a>
       <a class="nav-link <?= active('reports.php') ?>" href="<?= app_url('reports.php') ?>">📊 Тайлан</a>
+      <a class="nav-link <?= active('treatments.php') ?>" href="<?= app_url('treatments.php') ?>">🦷 Эмчилгээ</a>
     <?php endif; ?>
     <?php if ($role === 'reception'): ?>
       <a class="nav-link <?= active('receptionist.php') ?>" href="<?= app_url('receptionist.php') ?>">🧑‍⚕️ Эмч нэмэх</a>

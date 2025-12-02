@@ -50,8 +50,30 @@ const statusConfig = {
   cancelled: { color: '#ef4444', bg: 'linear-gradient(135deg, #fef2f2 0%, #fee2e2 100%)', textColor: '#991b1b', name: 'Cancelled', badge: '#7f1d1d' }
 };
 
+let TREATMENTS = [];
+
 function applyCssVars() {
   document.documentElement.style.setProperty('--hour-h', `${PX_PER_HOUR}px`);
+}
+
+async function loadTreatments() {
+  try {
+    const url = `${API}?action=treatments&_=${Date.now()}`;
+    const r = await fetchJSON(url);
+    if (!r?.ok) {
+      console.error('Treatments API Error:', r?.msg || 'Unknown error');
+      return;
+    }
+    TREATMENTS = r.data || [];
+    const options = '<option value="">Сонгоогүй</option>' + 
+      TREATMENTS.map(t => `<option value="${t.id}">${esc(t.name)} (${t.sessions} удаа)</option>`).join('');
+    const selAdd = q('#treatment_id');
+    const selEdit = q('#modalEdit select[name="treatment_id"]');
+    if (selAdd) selAdd.innerHTML = options;
+    if (selEdit) selEdit.innerHTML = options;
+  } catch (e) {
+    console.error('Error loading treatments:', e);
+  }
 }
 
 async function loadDoctors() {
@@ -652,6 +674,7 @@ document.addEventListener('DOMContentLoaded', async () => {
   const clinicSel = q('#clinic');
   if (clinicSel && clinicSel.value) CURRENT_CLINIC = clinicSel.value;
   await loadDoctors();
+  await loadTreatments();
   await loadBookings();
   window.addEventListener('message', async e => {
     if (e.data.reloadDoctors) { await loadDoctors(); await loadBookings(); showNotification('Doctor hours updated'); }
@@ -684,14 +707,17 @@ document.addEventListener('DOMContentLoaded', async () => {
     const f = e.target;
     const phoneField = f.querySelector('#phone');
     const phoneVal = phoneField ? phoneField.value.trim() : '';
-    const serviceField = f.querySelector('#service_name');
-    const serviceVal = serviceField ? serviceField.value.trim() : '';
-    if (!phoneVal) { phoneField?.classList.add('input-error'); phoneField?.focus(); showNotification('Please enter phone number'); return; }
+    const treatmentField = f.querySelector('#treatment_id');
+    const treatmentId = +(treatmentField?.value || 0);
+    if (!phoneVal) { phoneField?.classList.add('input-error'); phoneField?.focus(); showNotification('Утасны дугаар оруулна уу'); return; }
     phoneField?.classList.remove('input-error');
-    serviceField?.classList.remove('input-error');
-    if (!serviceVal) { serviceField?.classList.add('input-error'); serviceField?.focus(); showNotification('Please enter service name'); return; }
+    if (!treatmentId) { treatmentField?.classList.add('input-error'); treatmentField?.focus(); showNotification('Эмчилгээний төрөл сонгоно уу'); return; }
+    treatmentField?.classList.remove('input-error');
     if (typeof f.reportValidity === 'function' && !f.reportValidity()) return;
-    const payload = { action: 'add', clinic: CURRENT_CLINIC, doctor_id: +f.querySelector('#doctor_id').value, date: f.querySelector('#date').value, start_time: f.querySelector('#start_time').value, end_time: f.querySelector('#end_time').value, patient_name: f.querySelector('#patient_name').value.trim(), phone: phoneVal, status: f.querySelector('#status').value || 'online', service_name: serviceVal, gender: f.querySelector('#gender')?.value || '', visit_count: +(f.querySelector('#visit_count')?.value || 1), note: (f.querySelector('#note')?.value || '').trim() };
+    // Get treatment name for service_name field
+    const selectedTreatment = TREATMENTS.find(t => t.id == treatmentId);
+    const serviceName = selectedTreatment ? selectedTreatment.name : '';
+    const payload = { action: 'add', clinic: CURRENT_CLINIC, doctor_id: +f.querySelector('#doctor_id').value, date: f.querySelector('#date').value, start_time: f.querySelector('#start_time').value, end_time: f.querySelector('#end_time').value, patient_name: f.querySelector('#patient_name').value.trim(), phone: phoneVal, status: f.querySelector('#status').value || 'online', service_name: serviceName, gender: f.querySelector('#gender')?.value || '', visit_count: +(f.querySelector('#visit_count')?.value || 1), note: (f.querySelector('#note')?.value || '').trim(), treatment_id: treatmentId };
     try {
       const r = await fetch(`api.php?action=create`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) });
       const j = await r.json();
@@ -713,13 +739,11 @@ document.addEventListener('DOMContentLoaded', async () => {
   const addPhoneInput = q('#addForm #phone');
   addPhoneInput?.addEventListener('blur', e => { const phone = e.target.value.trim(); if (phone.length >= 7) loadPatientInfo(phone, 'addForm'); });
   addPhoneInput?.addEventListener('input', e => { addPhoneInput.classList.remove('input-error'); schedulePatientLookup(addPhoneInput, 'addForm'); });
-  const addServiceInput = q('#addForm #service_name');
-  addServiceInput?.addEventListener('input', () => addServiceInput.classList.remove('input-error'));
+  const addTreatmentSelect = q('#addForm #treatment_id');
+  addTreatmentSelect?.addEventListener('change', () => addTreatmentSelect.classList.remove('input-error'));
   const editPhoneInput = q('#editForm [name="phone"]');
   editPhoneInput?.addEventListener('blur', e => { const phone = e.target.value.trim(); if (phone.length >= 7) loadPatientInfo(phone, 'editForm'); });
   editPhoneInput?.addEventListener('input', e => { schedulePatientLookup(editPhoneInput, 'editForm'); });
-  const editServiceInput = q('#editForm [name="service_name"]');
-  editServiceInput?.addEventListener('input', () => editServiceInput.classList.remove('input-error'));
   document.getElementById('modalAdd')?.addEventListener('shown.bs.modal', () => { const phone = q('#addForm #phone'); if (phone) { phone.classList.add('phone-reminder'); phone.focus(); setTimeout(() => phone.classList.remove('phone-reminder'), 1600); } });
   q('#editForm')?.addEventListener('submit', saveEdit);
   q('#btnDelete')?.addEventListener('click', deleteBooking);

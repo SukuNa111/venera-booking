@@ -353,11 +353,20 @@ if ($action === 'create' && $_SERVER['REQUEST_METHOD']==='POST') {
     $visit_count = (int)($in['visit_count'] ?? 1);
     $phone       = trim($in['phone'] ?? '');
     $note        = trim($in['note'] ?? '');
-    $service_name = trim($in['service_name'] ?? '');   // 🟩 Нэмэлт мөр
+    $service_name = trim($in['service_name'] ?? '');
     $status      = trim($in['status'] ?? 'online');
+    $treatment_id = (int)($in['treatment_id'] ?? 0);   // 🦷 Treatment ID
+    $session_number = (int)($in['session_number'] ?? 1); // 🦷 Session number
 
-    if (!$clinic || !$date || !$start || !$end || $patient === '' || $service_name === '') {
+    if (!$clinic || !$date || !$start || !$end || $patient === '' || !$treatment_id) {
       json_exit(['ok'=>false, 'msg'=>'Талбар дутуу байна.'], 422);
+    }
+    
+    // Get service_name from treatment if not provided
+    if (empty($service_name) && $treatment_id > 0) {
+      $stTreatName = db()->prepare("SELECT name FROM treatments WHERE id = ?");
+      $stTreatName->execute([$treatment_id]);
+      $service_name = $stTreatName->fetchColumn() ?: '';
     }
 
     // === ЭМЧИЙН АЖИЛЛАХ ЦАГ ШАЛГАХ ===
@@ -428,14 +437,15 @@ if ($action === 'create' && $_SERVER['REQUEST_METHOD']==='POST') {
     $ins = db()->prepare("
       INSERT INTO bookings
         (doctor_id, clinic, date, start_time, end_time,
-         patient_name, gender, visit_count, phone, note, service_name, status, department, created_at)
-      VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,NOW())
+         patient_name, gender, visit_count, phone, note, service_name, status, department, treatment_id, session_number, created_at)
+      VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,NOW())
     ");
     
     try {
       $ins->execute([
         $doctor_id > 0 ? $doctor_id : null, $clinic, $date, $start, $end,
-        $patient, $gender, $visit_count, $phone, $note, $service_name, $status, $bookingDept
+        $patient, $gender, $visit_count, $phone, $note, $service_name, $status, $bookingDept,
+        $treatment_id > 0 ? $treatment_id : null, $session_number
       ]);
     } catch (PDOException $dbEx) {
       error_log("❌ Booking INSERT failed: " . $dbEx->getMessage());
@@ -448,8 +458,8 @@ if ($action === 'create' && $_SERVER['REQUEST_METHOD']==='POST') {
     // If a phone number is provided, send an SMS notification about the successful booking.
     // This uses the sendSMS helper defined in config.php (Twilio or local logging).
     if (!empty($phone) && function_exists('sendSMS')) {
-      // Compose a more detailed SMS including clinic and doctor info
-      $clinicName = $clinic;
+      // Get clinic and doctor names
+      $clinicName = '';
       $doctorName = '';
       try {
         // Get clinic human-readable name
@@ -468,17 +478,38 @@ if ($action === 'create' && $_SERVER['REQUEST_METHOD']==='POST') {
           $doctorName = '';
         }
       }
-      $msg  = "Сайн байна уу, таны захиалга амжилттай бүртгэгдлээ.";
+      // SMS message in Latin (works on all operators)
+      $msg = "Sain baina uu, tany zahialga amjilttai burtgegdlee.";
       if ($clinicName) {
-        $msg .= " Эмнэлэг: {$clinicName}";
+        $msg .= " Emnelеg: {$clinicName}.";
       }
       if ($doctorName) {
-        $msg .= ", Эмч: {$doctorName}";
+        $msg .= " Emch: {$doctorName}.";
       }
-      $msg .= ". Огноо: {$date}, цаг: {$start}–{$end}.";
+      $msg .= " Ognoo: {$date}, tsag: {$start}-{$end}.";
       // Send SMS (if configured) – errors are ignored so booking still succeeds
       try {
         sendSMS($phone, $msg, $newId);
+        
+        // Schedule reminder SMS for day before appointment
+        $reminderDate = date('Y-m-d 10:00:00', strtotime($date . ' -1 day'));
+        if (strtotime($reminderDate) > time()) {
+          $reminderMsg = "Sain baina uu! Margaash {$date} ognoo {$start} tsagt {$clinicName} emnelegd tsag avsan baina. Hutsleh bol 70001234 ruu zalgarai.";
+          $stSched = db()->prepare("INSERT INTO sms_schedule (booking_id, phone, message, scheduled_at, type) VALUES (?, ?, ?, ?, 'reminder')");
+          $stSched->execute([$newId, $phone, $reminderMsg, $reminderDate]);
+        }
+        
+        // Schedule aftercare SMS if treatment has aftercare
+        if (!empty($treatment_id)) {
+          $stTreat = db()->prepare("SELECT aftercare_days, aftercare_message FROM treatments WHERE id = ? AND aftercare_days > 0");
+          $stTreat->execute([$treatment_id]);
+          $treatment = $stTreat->fetch();
+          if ($treatment && $treatment['aftercare_message']) {
+            $aftercareDate = date('Y-m-d 10:00:00', strtotime($date . ' +' . $treatment['aftercare_days'] . ' days'));
+            $stSched = db()->prepare("INSERT INTO sms_schedule (booking_id, phone, message, scheduled_at, type) VALUES (?, ?, ?, ?, 'aftercare')");
+            $stSched->execute([$newId, $phone, $treatment['aftercare_message'], $aftercareDate]);
+          }
+        }
       } catch (Exception $smsEx) {
         // ignore SMS errors
       }
@@ -816,6 +847,50 @@ if ($action === 'delete_doctor' && $_SERVER['REQUEST_METHOD']==='POST') {
     $del->execute([$id]);
     
     json_exit(['ok'=>true, 'msg'=>'Эмч амжилттай устгагдлаа.']);
+  } catch (Exception $e) {
+    json_exit(['ok'=>false, 'msg'=>$e->getMessage()], 500);
+  }
+}
+
+/* =========================
+   TREATMENTS - List all treatments
+   ========================= */
+if ($action === 'treatments' && $_SERVER['REQUEST_METHOD']==='GET') {
+  try {
+    $st = db()->prepare("SELECT * FROM treatments ORDER BY name");
+    $st->execute();
+    $treatments = $st->fetchAll();
+    json_exit(['ok'=>true, 'data'=>$treatments]);
+  } catch (Exception $e) {
+    json_exit(['ok'=>false, 'msg'=>$e->getMessage()], 500);
+  }
+}
+
+/* =========================
+   ADD TREATMENT (Admin & Reception)
+   ========================= */
+if ($action === 'add_treatment' && $_SERVER['REQUEST_METHOD']==='POST') {
+  try {
+    require_role(['admin', 'reception']);
+    $in = json_decode(file_get_contents('php://input'), true) ?: [];
+    
+    $name = trim($in['name'] ?? '');
+    $sessions = (int)($in['sessions'] ?? 1);
+    $interval_days = (int)($in['interval_days'] ?? 0);
+    $aftercare_days = (int)($in['aftercare_days'] ?? 0);
+    $aftercare_message = trim($in['aftercare_message'] ?? '');
+    
+    if (!$name) {
+      json_exit(['ok'=>false, 'msg'=>'Эмчилгээний нэр оруулна уу'], 422);
+    }
+    
+    $ins = db()->prepare("
+      INSERT INTO treatments (name, sessions, interval_days, aftercare_days, aftercare_message)
+      VALUES (?, ?, ?, ?, ?)
+    ");
+    $ins->execute([$name, $sessions, $interval_days, $aftercare_days, $aftercare_message]);
+    
+    json_exit(['ok'=>true, 'msg'=>'Эмчилгээ нэмэгдлээ', 'id'=>db()->lastInsertId()]);
   } catch (Exception $e) {
     json_exit(['ok'=>false, 'msg'=>$e->getMessage()], 500);
   }
