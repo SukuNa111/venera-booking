@@ -1,0 +1,21 @@
+# Environment files
+.env
+*.log
+
+# Temporary files
+*.tmp
+*.bak
+check_*.php
+test_*.php
+
+# Uploads (user data)
+uploads/avatars/*
+!uploads/avatars/.gitkeep
+
+# IDE
+.vscode/
+.idea/
+
+# OS
+.DS_Store
+Thumbs.db

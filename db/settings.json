@@ -1,0 +1,9 @@
+{
+    "clinic_name": "Venera-Dent",
+    "theme_color": "#383336",
+    "secondary_color": "#8b5cf6",
+    "default_view": "day",
+    "auto_fill": true,
+    "send_reminders": true,
+    "patient_lookup_scope": "global"
+}
