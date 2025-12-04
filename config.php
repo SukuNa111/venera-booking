@@ -58,7 +58,8 @@ function db() {
 // URL Helper
 // -----------------------
 function app_url($path = '') {
-    return '/booking/public/' . ltrim($path, '/');
+    // Docker: DocumentRoot = /var/www/html/public, тиймээс URL нь зүгээр /
+    return '/' . ltrim($path, '/');
 }
 
 // -----------------------

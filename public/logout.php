@@ -1,6 +1,6 @@
 <?php
 require_once __DIR__ . '/../config.php';
-session_start();
+// session_start() is already called in config.php
 session_unset();
 session_destroy();
 header('Location: login.php');

@@ -35,6 +35,7 @@ services:
       DB_NAME: hospital_db
       DB_USER: postgres
       DB_PASS: "1234"
+      DOCKER_ENV: "true"
     networks:
       - booking-network
 
