@@ -52,9 +52,9 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
 
 try {
     if ($isAdmin) {
-        $rows = db()->query("SELECT f.*, DATE_FORMAT(f.created_at, '%Y-%m-%d %H:%i') AS created_fmt FROM feedback f ORDER BY f.created_at DESC LIMIT 50")->fetchAll();
+        $rows = db()->query("SELECT f.*, TO_CHAR(f.created_at, 'YYYY-MM-DD HH24:MI') AS created_fmt FROM feedback f ORDER BY f.created_at DESC LIMIT 50")->fetchAll();
     } else {
-        $st = db()->prepare("SELECT f.*, DATE_FORMAT(f.created_at, '%Y-%m-%d %H:%i') AS created_fmt FROM feedback f WHERE user_id=? ORDER BY f.created_at DESC LIMIT 20");
+        $st = db()->prepare("SELECT f.*, TO_CHAR(f.created_at, 'YYYY-MM-DD HH24:MI') AS created_fmt FROM feedback f WHERE user_id=? ORDER BY f.created_at DESC LIMIT 20");
         $st->execute([(int)$user['id']]);
         $rows = $st->fetchAll();
     }

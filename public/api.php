@@ -324,10 +324,10 @@ if ($action === 'bookings_month' && $_SERVER['REQUEST_METHOD']==='GET') {
     $cu = current_user();
     $role = $cu['role'] ?? '';
     if ($clinic === 'all') {
-      $st = db()->prepare("SELECT b.*, d.name AS doctor_name, COALESCE(NULLIF(d.color,''),'#0d6efd') AS doctor_color, d.department FROM bookings b LEFT JOIN doctors d ON d.id=b.doctor_id WHERE DATE_FORMAT(b.date, '%Y-%m')=? ORDER BY b.date, b.start_time");
+      $st = db()->prepare("SELECT b.*, d.name AS doctor_name, COALESCE(NULLIF(d.color,''),'#0d6efd') AS doctor_color, d.department FROM bookings b LEFT JOIN doctors d ON d.id=b.doctor_id WHERE TO_CHAR(b.date, 'YYYY-MM')=? ORDER BY b.date, b.start_time");
       $st->execute([$month]);
     } else {
-      $st = db()->prepare("SELECT b.*, d.name AS doctor_name, COALESCE(NULLIF(d.color,''),'#0d6efd') AS doctor_color, d.department FROM bookings b LEFT JOIN doctors d ON d.id=b.doctor_id WHERE b.clinic=? AND DATE_FORMAT(b.date, '%Y-%m')=? ORDER BY b.date, b.start_time");
+      $st = db()->prepare("SELECT b.*, d.name AS doctor_name, COALESCE(NULLIF(d.color,''),'#0d6efd') AS doctor_color, d.department FROM bookings b LEFT JOIN doctors d ON d.id=b.doctor_id WHERE b.clinic=? AND TO_CHAR(b.date, 'YYYY-MM')=? ORDER BY b.date, b.start_time");
       $st->execute([$clinic, $month]);
     }
     json_exit(['ok'=>true,'data'=>$st->fetchAll()]);

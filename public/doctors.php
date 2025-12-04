@@ -221,14 +221,14 @@ $total_stats['success_rate'] = $total_stats['total_bookings'] ?
 $workload_query = "
     SELECT 
         d.id as doctor_id,
-        HOUR(b.start_time) as hour,
+        EXTRACT(HOUR FROM b.start_time)::integer as hour,
         COUNT(b.id) as booking_count
     FROM doctors d
     LEFT JOIN bookings b ON d.id = b.doctor_id 
         AND b.date BETWEEN ? AND ?
         AND b.status != 'cancelled'
     WHERE (? = 'all' OR d.clinic = ?)
-    GROUP BY d.id, HOUR(b.start_time)
+    GROUP BY d.id, EXTRACT(HOUR FROM b.start_time)
     ORDER BY d.id, hour
 ";
 

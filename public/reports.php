@@ -8,15 +8,15 @@ require_role(['admin', 'reception', 'doctor']);
 $period = $_GET['period'] ?? 'week';
 switch ($period) {
   case 'day':   
-    $range = "CURDATE()"; 
+    $range = "CURRENT_DATE"; 
     $label = "Өнөөдөр"; 
     break;
   case 'month': 
-    $range = "DATE_SUB(CURDATE(), INTERVAL 30 DAY)"; 
+    $range = "CURRENT_DATE - INTERVAL '30 days'"; 
     $label = "Сүүлийн 30 хоног"; 
     break;
   default:      
-    $range = "DATE_SUB(CURDATE(), INTERVAL 7 DAY)";  
+    $range = "CURRENT_DATE - INTERVAL '7 days'";  
     $label = "Сүүлийн 7 хоног";
 }
 
@@ -54,7 +54,7 @@ if (isset($_GET['export']) && $_GET['export'] === 'excel') {
   foreach ($clinics as $clinic) {
     if ($activeClinic !== 'all' && $activeClinic !== $clinic) continue;
     
-    $where = "b.clinic = ? AND b.date BETWEEN $range AND CURDATE()";
+    $where = "b.clinic = ? AND b.date BETWEEN $range AND CURRENT_DATE";
     $params = [$clinic];
     
     if ($activeDepartment !== 'all') {
@@ -145,7 +145,7 @@ foreach ($clinics as $clinic) {
     FROM bookings b
     JOIN doctors d ON d.id = b.doctor_id
     WHERE b.clinic = ?
-      AND b.date BETWEEN $range AND CURDATE()
+      AND b.date BETWEEN $range AND CURRENT_DATE
     GROUP BY d.id, b.clinic
     ORDER BY total DESC
   ");
@@ -160,7 +160,7 @@ foreach ($clinics as $clinic) {
 $grandRate = $grandTotal ? round(($grandPaid / $grandTotal) * 100, 1) : 0;
 
 // 🔹 Status counts (онлайн, хүлээгдэж буй, ирсэн)
-$where = "b.date BETWEEN $range AND CURDATE()";
+$where = "b.date BETWEEN $range AND CURRENT_DATE";
 $params = [];
 
 if ($activeClinic !== 'all') {

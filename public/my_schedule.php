@@ -16,7 +16,7 @@ $st = db()->prepare("
   SELECT id, patient_name, service_name, date, start_time, end_time, status
   FROM bookings
   WHERE doctor_id = ?
-    AND date >= CURDATE()
+    AND date >= CURRENT_DATE
   ORDER BY date, start_time
 ");
 $st->execute([$doctor_id]);

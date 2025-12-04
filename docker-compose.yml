@@ -1,0 +1,46 @@
+version: '3.8'
+
+services:
+  # PostgreSQL Database
+  postgres:
+    image: postgres:15
+    container_name: booking-postgres
+    restart: always
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: "1234"
+      POSTGRES_DB: hospital_db
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./db/postgresql_schema.sql:/docker-entrypoint-initdb.d/init.sql
+    ports:
+      - "5432:5432"
+    networks:
+      - booking-network
+
+  # PHP Application
+  app:
+    build: .
+    container_name: booking-app
+    restart: always
+    ports:
+      - "80:80"
+    volumes:
+      - ./uploads:/var/www/html/uploads
+    depends_on:
+      - postgres
+    environment:
+      DB_HOST: postgres
+      DB_PORT: 5432
+      DB_NAME: hospital_db
+      DB_USER: postgres
+      DB_PASS: "1234"
+    networks:
+      - booking-network
+
+networks:
+  booking-network:
+    driver: bridge
+
+volumes:
+  postgres_data:

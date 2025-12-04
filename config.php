@@ -1,7 +1,7 @@
 <?php
 // ============================================
 // CONFIG.PHP — Venera-Dent Booking System
-// Skytel WEB2SMS Integration
+// Skytel WEB2SMS Integration + PostgreSQL
 // ============================================
 
 date_default_timezone_set('Asia/Ulaanbaatar');
@@ -13,19 +13,27 @@ if (session_status() !== PHP_SESSION_ACTIVE) {
 // -----------------------
 // Database Configuration
 // -----------------------
-define('DB_HOST', '127.0.0.1');
-define('DB_PORT', 3307);
-define('DB_NAME', 'hospital_db');
-define('DB_USER', 'root');
-define('DB_PASS', '');
+// PostgreSQL connection - Supports both Docker and Local
+define('DB_TYPE', 'pgsql');
+define('DB_HOST', getenv('DB_HOST') ?: '192.168.1.94');
+define('DB_PORT', getenv('DB_PORT') ?: 5432);
+define('DB_NAME', getenv('DB_NAME') ?: 'hospital_db');
+define('DB_USER', getenv('DB_USER') ?: 'postgres');
+define('DB_PASS', getenv('DB_PASS') ?: '1234');
 
 function db() {
     static $pdo = null;
     if ($pdo) return $pdo;
 
     try {
+        if (DB_TYPE === 'pgsql') {
+            $dsn = 'pgsql:host=' . DB_HOST . ';port=' . DB_PORT . ';dbname=' . DB_NAME . ';options=\'--client_encoding=UTF8\'';
+        } else {
+            $dsn = 'mysql:host=' . DB_HOST . ';port=' . DB_PORT . ';dbname=' . DB_NAME . ';charset=utf8mb4';
+        }
+        
         $pdo = new PDO(
-            'mysql:host=' . DB_HOST . ';port=' . DB_PORT . ';dbname=' . DB_NAME . ';charset=utf8mb4',
+            $dsn,
             DB_USER,
             DB_PASS,
             [
@@ -33,6 +41,11 @@ function db() {
                 PDO::ATTR_DEFAULT_FETCH_MODE => PDO::FETCH_ASSOC
             ]
         );
+        
+        // Set UTF-8 encoding for PostgreSQL
+        if (DB_TYPE === 'pgsql') {
+            $pdo->exec("SET NAMES 'UTF8'");
+        }
     } catch (PDOException $e) {
         http_response_code(500);
         echo '❌ DB connection failed: ' . htmlspecialchars($e->getMessage());
