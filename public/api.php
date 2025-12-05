@@ -8,8 +8,6 @@ if (ob_get_level()) {
     ob_end_clean();
 }
 
-require_login();
-
 $action = $_GET['action'] ?? '';
 
 /* JSON Exit Helper */
@@ -18,6 +16,21 @@ function json_exit($arr, $code = 200) {
   echo json_encode($arr, JSON_UNESCAPED_UNICODE | JSON_PRETTY_PRINT);
   exit;
 }
+
+// Public API: treatments (no login required)
+if ($action === 'treatments' && $_SERVER['REQUEST_METHOD']==='GET') {
+  try {
+    $st = db()->prepare("SELECT id, name, category, price, sessions, interval_days, next_visit_mode, aftercare_days, aftercare_message FROM treatments ORDER BY category, name");
+    $st->execute();
+    $treatments = $st->fetchAll();
+    json_exit(['ok'=>true, 'data'=>$treatments]);
+  } catch (Exception $e) {
+    json_exit(['ok'=>false, 'msg'=>$e->getMessage()], 500);
+  }
+}
+
+// All other actions require login
+require_login();
 
 // sendSMS is provided by config.php (uses Twilio if configured, otherwise logs to sms_log)
 
@@ -853,20 +866,6 @@ if ($action === 'delete_doctor' && $_SERVER['REQUEST_METHOD']==='POST') {
 }
 
 /* =========================
-   TREATMENTS - List all treatments
-   ========================= */
-if ($action === 'treatments' && $_SERVER['REQUEST_METHOD']==='GET') {
-  try {
-    $st = db()->prepare("SELECT * FROM treatments ORDER BY name");
-    $st->execute();
-    $treatments = $st->fetchAll();
-    json_exit(['ok'=>true, 'data'=>$treatments]);
-  } catch (Exception $e) {
-    json_exit(['ok'=>false, 'msg'=>$e->getMessage()], 500);
-  }
-}
-
-/* =========================
    ADD TREATMENT (Admin & Reception)
    ========================= */
 if ($action === 'add_treatment' && $_SERVER['REQUEST_METHOD']==='POST') {
@@ -875,8 +874,11 @@ if ($action === 'add_treatment' && $_SERVER['REQUEST_METHOD']==='POST') {
     $in = json_decode(file_get_contents('php://input'), true) ?: [];
     
     $name = trim($in['name'] ?? '');
+    $category = trim($in['category'] ?? '');
+    $price = (float)($in['price'] ?? 0);
     $sessions = (int)($in['sessions'] ?? 1);
     $interval_days = (int)($in['interval_days'] ?? 0);
+    $next_visit_mode = in_array($in['next_visit_mode'] ?? '', ['auto', 'manual']) ? $in['next_visit_mode'] : 'auto';
     $aftercare_days = (int)($in['aftercare_days'] ?? 0);
     $aftercare_message = trim($in['aftercare_message'] ?? '');
     
@@ -885,12 +887,133 @@ if ($action === 'add_treatment' && $_SERVER['REQUEST_METHOD']==='POST') {
     }
     
     $ins = db()->prepare("
-      INSERT INTO treatments (name, sessions, interval_days, aftercare_days, aftercare_message)
-      VALUES (?, ?, ?, ?, ?)
+      INSERT INTO treatments (name, category, price, sessions, interval_days, next_visit_mode, aftercare_days, aftercare_message)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?)
     ");
-    $ins->execute([$name, $sessions, $interval_days, $aftercare_days, $aftercare_message]);
+    $ins->execute([$name, $category, $price, $sessions, $interval_days, $next_visit_mode, $aftercare_days, $aftercare_message]);
     
     json_exit(['ok'=>true, 'msg'=>'Эмчилгээ нэмэгдлээ', 'id'=>db()->lastInsertId()]);
+  } catch (Exception $e) {
+    json_exit(['ok'=>false, 'msg'=>$e->getMessage()], 500);
+  }
+}
+
+/* =========================
+   UPDATE TREATMENT (Admin & Reception)
+   ========================= */
+if ($action === 'update_treatment' && $_SERVER['REQUEST_METHOD']==='POST') {
+  try {
+    require_role(['admin', 'reception']);
+    $in = json_decode(file_get_contents('php://input'), true) ?: [];
+    
+    $id = (int)($in['id'] ?? 0);
+    $name = trim($in['name'] ?? '');
+    $category = trim($in['category'] ?? '');
+    $price = (float)($in['price'] ?? 0);
+    $sessions = (int)($in['sessions'] ?? 1);
+    $interval_days = (int)($in['interval_days'] ?? 0);
+    $next_visit_mode = in_array($in['next_visit_mode'] ?? '', ['auto', 'manual']) ? $in['next_visit_mode'] : 'auto';
+    $aftercare_days = (int)($in['aftercare_days'] ?? 0);
+    $aftercare_message = trim($in['aftercare_message'] ?? '');
+    
+    if (!$id || !$name) {
+      json_exit(['ok'=>false, 'msg'=>'ID болон нэр заавал шаардлагатай'], 422);
+    }
+    
+    $upd = db()->prepare("
+      UPDATE treatments SET 
+        name = ?, category = ?, price = ?, sessions = ?, interval_days = ?, 
+        next_visit_mode = ?, aftercare_days = ?, aftercare_message = ?
+      WHERE id = ?
+    ");
+    $upd->execute([$name, $category, $price, $sessions, $interval_days, $next_visit_mode, $aftercare_days, $aftercare_message, $id]);
+    
+    json_exit(['ok'=>true, 'msg'=>'Эмчилгээ шинэчлэгдлээ']);
+  } catch (Exception $e) {
+    json_exit(['ok'=>false, 'msg'=>$e->getMessage()], 500);
+  }
+}
+
+/* =========================
+   DELETE TREATMENT (Admin only)
+   ========================= */
+if ($action === 'delete_treatment' && $_SERVER['REQUEST_METHOD']==='POST') {
+  try {
+    require_role(['admin']);
+    $in = json_decode(file_get_contents('php://input'), true) ?: [];
+    $id = (int)($in['id'] ?? 0);
+    
+    if (!$id) {
+      json_exit(['ok'=>false, 'msg'=>'ID заавал шаардлагатай'], 422);
+    }
+    
+    // Check if treatment is used in bookings
+    $check = db()->prepare("SELECT COUNT(*) FROM bookings WHERE treatment_id = ?");
+    $check->execute([$id]);
+    if ($check->fetchColumn() > 0) {
+      json_exit(['ok'=>false, 'msg'=>'Энэ эмчилгээтэй холбоотой цаг захиалга байгаа тул устгах боломжгүй'], 422);
+    }
+    
+    $del = db()->prepare("DELETE FROM treatments WHERE id = ?");
+    $del->execute([$id]);
+    
+    json_exit(['ok'=>true, 'msg'=>'Эмчилгээ устгагдлаа']);
+  } catch (Exception $e) {
+    json_exit(['ok'=>false, 'msg'=>$e->getMessage()], 500);
+  }
+}
+
+/* =========================
+   UPDATE SMS SCHEDULE
+   ========================= */
+if ($action === 'update_sms' && $_SERVER['REQUEST_METHOD']==='POST') {
+  try {
+    require_role(['admin', 'reception']);
+    $in = json_decode(file_get_contents('php://input'), true) ?: [];
+    
+    $id = (int)($in['id'] ?? 0);
+    $phone = trim($in['phone'] ?? '');
+    $message = trim($in['message'] ?? '');
+    $scheduled_at = trim($in['scheduled_at'] ?? '');
+    
+    if (!$id || !$phone || !$message) {
+      json_exit(['ok'=>false, 'msg'=>'Бүх талбарыг бөглөнө үү'], 422);
+    }
+    
+    $upd = db()->prepare("
+      UPDATE sms_schedule SET phone = ?, message = ?, scheduled_at = ?
+      WHERE id = ? AND status = 'pending'
+    ");
+    $upd->execute([$phone, $message, $scheduled_at, $id]);
+    
+    json_exit(['ok'=>true, 'msg'=>'SMS шинэчлэгдлээ']);
+  } catch (Exception $e) {
+    json_exit(['ok'=>false, 'msg'=>$e->getMessage()], 500);
+  }
+}
+
+/* =========================
+   DELETE SMS SCHEDULE
+   ========================= */
+if ($action === 'delete_sms' && $_SERVER['REQUEST_METHOD']==='POST') {
+  try {
+    require_role(['admin', 'reception']);
+    $in = json_decode(file_get_contents('php://input'), true) ?: [];
+    $id = (int)($in['id'] ?? 0);
+    
+    if (!$id) {
+      json_exit(['ok'=>false, 'msg'=>'ID заавал шаардлагатай'], 422);
+    }
+    
+    // Only delete pending SMS
+    $del = db()->prepare("DELETE FROM sms_schedule WHERE id = ? AND status = 'pending'");
+    $del->execute([$id]);
+    
+    if ($del->rowCount() > 0) {
+      json_exit(['ok'=>true, 'msg'=>'SMS устгагдлаа']);
+    } else {
+      json_exit(['ok'=>false, 'msg'=>'Устгах боломжгүй (илгээсэн эсвэл олдсонгүй)'], 422);
+    }
   } catch (Exception $e) {
     json_exit(['ok'=>false, 'msg'=>$e->getMessage()], 500);
   }

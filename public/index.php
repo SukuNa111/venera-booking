@@ -630,6 +630,85 @@ $defaultView    = $settings['default_view']   ?? $settingsDefault['default_view'
       box-shadow: 0 0 0 4px rgba(249, 115, 22, 0.15) !important;
     }
 
+    /* Treatment Searchable Select */
+    .treatment-select-wrapper {
+      position: relative;
+    }
+    .treatment-dropdown {
+      position: absolute;
+      top: 100%;
+      left: 0;
+      right: 0;
+      background: white;
+      border: 1px solid #e2e8f0;
+      border-radius: 12px;
+      max-height: 350px;
+      overflow-y: auto;
+      z-index: 1050;
+      display: none;
+      box-shadow: 0 10px 40px rgba(0,0,0,0.15);
+    }
+    .treatment-dropdown.show { display: block; }
+    .treatment-category {
+      padding: 8px 14px;
+      background: #f8fafc;
+      font-size: 11px;
+      font-weight: 700;
+      color: #6366f1;
+      text-transform: uppercase;
+      border-bottom: 1px solid #e2e8f0;
+      position: sticky;
+      top: 0;
+    }
+    .treatment-option {
+      padding: 10px 14px;
+      cursor: pointer;
+      border-bottom: 1px solid #f1f5f9;
+      font-size: 14px;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      gap: 10px;
+    }
+    .treatment-option:hover, .treatment-option.active {
+      background: #f0f4ff;
+    }
+    .treatment-option:last-child {
+      border-bottom: none;
+    }
+    .treatment-option .treatment-name {
+      flex: 1;
+    }
+    .treatment-option .treatment-name small {
+      color: #94a3b8;
+    }
+    .treatment-option .treatment-price {
+      color: #059669;
+      font-weight: 600;
+      font-size: 13px;
+      white-space: nowrap;
+    }
+    .treatment-option.custom-option {
+      background: linear-gradient(135deg, #fef3c7 0%, #fde68a 100%);
+      color: #92400e;
+      font-weight: 500;
+    }
+    .treatment-option.custom-option:hover {
+      background: linear-gradient(135deg, #fde68a 0%, #fcd34d 100%);
+    }
+    .treatment-option.custom-option i {
+      margin-right: 8px;
+    }
+    .treatment-option.no-result {
+      color: #94a3b8;
+      cursor: default;
+      text-align: center;
+      padding: 20px;
+    }
+    .treatment-option.no-result:hover {
+      background: white;
+    }
+
     @keyframes fadeInUp {
       from {
         opacity: 0;
@@ -776,10 +855,13 @@ $defaultView    = $settings['default_view']   ?? $settingsDefault['default_view'
           </div>
           <div class="col-md-4">
             <label class="form-label">Эмчилгээний төрөл <span class="text-warning fw-semibold">*</span></label>
-            <select name="treatment_id" id="treatment_id" class="form-select" required>
-              <option value="">Сонгох...</option>
-            </select>
-            <small class="text-muted">Сануулга, дараах эмчилгээ SMS илгээнэ</small>
+            <div class="treatment-select-wrapper">
+              <input type="text" id="treatment_search" class="form-control" placeholder="Хайх эсвэл бичих..." autocomplete="off">
+              <input type="hidden" name="treatment_id" id="treatment_id">
+              <input type="hidden" name="custom_treatment" id="custom_treatment">
+              <div id="treatment_dropdown" class="treatment-dropdown"></div>
+            </div>
+            <small class="text-muted">Сонгох эсвэл шинээр бичнэ үү</small>
           </div>
 
           <div class="col-md-4">

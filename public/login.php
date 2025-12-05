@@ -10,12 +10,53 @@ if (!empty($_SESSION['uid'])) {
 $error = '';
 $phone_old = '';
 
+// Rate limiting - 5 оролдлого 15 минутанд
+function checkLoginAttempts($phone) {
+    $key = 'login_attempts_' . md5($phone . $_SERVER['REMOTE_ADDR']);
+    $file = sys_get_temp_dir() . '/' . $key;
+    
+    if (file_exists($file)) {
+        $data = json_decode(file_get_contents($file), true);
+        if ($data && time() - $data['first_attempt'] < 900) { // 15 минут
+            if ($data['count'] >= 5) {
+                $remaining = 900 - (time() - $data['first_attempt']);
+                return ['blocked' => true, 'remaining' => ceil($remaining / 60)];
+            }
+            return ['blocked' => false, 'count' => $data['count']];
+        }
+    }
+    return ['blocked' => false, 'count' => 0];
+}
+
+function recordLoginAttempt($phone, $success = false) {
+    $key = 'login_attempts_' . md5($phone . $_SERVER['REMOTE_ADDR']);
+    $file = sys_get_temp_dir() . '/' . $key;
+    
+    if ($success) {
+        @unlink($file);
+        return;
+    }
+    
+    $data = ['count' => 1, 'first_attempt' => time()];
+    if (file_exists($file)) {
+        $existing = json_decode(file_get_contents($file), true);
+        if ($existing && time() - $existing['first_attempt'] < 900) {
+            $data = ['count' => $existing['count'] + 1, 'first_attempt' => $existing['first_attempt']];
+        }
+    }
+    file_put_contents($file, json_encode($data));
+}
+
 if ($_SERVER['REQUEST_METHOD'] === 'POST') {
   $phone = trim($_POST['phone'] ?? '');
   $pin   = trim($_POST['pin'] ?? '');
   $phone_old = $phone;
-
-  if ($phone === '' || $pin === '') {
+  
+  // Rate limit шалгах
+  $rateCheck = checkLoginAttempts($phone);
+  if ($rateCheck['blocked']) {
+    $error = "⏳ Хэт олон оролдлого. {$rateCheck['remaining']} минут хүлээнэ үү.";
+  } elseif ($phone === '' || $pin === '') {
     $error = '📱 Утасны дугаар болон PIN заавал оруулна уу.';
   } else {
     $st = db()->prepare("SELECT * FROM users WHERE phone=? LIMIT 1");
@@ -23,6 +64,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     $u = $st->fetch();
 
     if ($u && password_verify($pin, $u['pin_hash'])) {
+      recordLoginAttempt($phone, true); // Амжилттай - counter устгах
       $_SESSION['uid']       = (int)$u['id'];
       $_SESSION['name']      = $u['name'];
       $_SESSION['role']      = $u['role'];
@@ -36,6 +78,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
       }
       exit;
     } else {
+      recordLoginAttempt($phone, false); // Амжилтгүй - counter нэмэх
       $error = '❌ Нэвтрэх мэдээлэл буруу байна.';
     }
   }

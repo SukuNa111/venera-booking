@@ -1,0 +1,117 @@
+# ===========================================
+# MULTI-CLINIC DOCKER COMPOSE
+# Each clinic runs in separate container
+# ===========================================
+
+version: '3.8'
+
+services:
+  # Shared PostgreSQL Database
+  postgres:
+    image: postgres:15-alpine
+    container_name: booking_postgres
+    restart: always
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: ${DB_PASSWORD:-StrongPassword123!}
+      POSTGRES_DB: hospital_db
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./db/postgresql_schema.sql:/docker-entrypoint-initdb.d/01-schema.sql
+    ports:
+      - "5432:5432"
+    networks:
+      - booking_network
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # Venera Dent Clinic
+  venera:
+    build: .
+    container_name: booking_venera
+    restart: always
+    environment:
+      DB_HOST: postgres
+      DB_PORT: 5432
+      DB_NAME: hospital_db
+      DB_USER: postgres
+      DB_PASS: ${DB_PASSWORD:-StrongPassword123!}
+      APP_ENV: production
+      APP_DEBUG: "false"
+      SMS_ENABLED: "true"
+      SMS_TOKEN: ${SMS_TOKEN_VENERA}
+      CLINIC_CODE: venera
+    volumes:
+      - venera_uploads:/var/www/html/uploads
+    ports:
+      - "8080:80"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    networks:
+      - booking_network
+
+  # Golden Luxor Clinic
+  luxor:
+    build: .
+    container_name: booking_luxor
+    restart: always
+    environment:
+      DB_HOST: postgres
+      DB_PORT: 5432
+      DB_NAME: hospital_db
+      DB_USER: postgres
+      DB_PASS: ${DB_PASSWORD:-StrongPassword123!}
+      APP_ENV: production
+      APP_DEBUG: "false"
+      SMS_ENABLED: "true"
+      SMS_TOKEN: ${SMS_TOKEN_LUXOR}
+      CLINIC_CODE: luxor
+    volumes:
+      - luxor_uploads:/var/www/html/uploads
+    ports:
+      - "8081:80"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    networks:
+      - booking_network
+
+  # Khatan Clinic
+  khatan:
+    build: .
+    container_name: booking_khatan
+    restart: always
+    environment:
+      DB_HOST: postgres
+      DB_PORT: 5432
+      DB_NAME: hospital_db
+      DB_USER: postgres
+      DB_PASS: ${DB_PASSWORD:-StrongPassword123!}
+      APP_ENV: production
+      APP_DEBUG: "false"
+      SMS_ENABLED: "true"
+      SMS_TOKEN: ${SMS_TOKEN_KHATAN}
+      CLINIC_CODE: khatan
+    volumes:
+      - khatan_uploads:/var/www/html/uploads
+    ports:
+      - "8082:80"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    networks:
+      - booking_network
+
+volumes:
+  postgres_data:
+  venera_uploads:
+  luxor_uploads:
+  khatan_uploads:
+
+networks:
+  booking_network:
+    driver: bridge

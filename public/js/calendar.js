@@ -10,7 +10,7 @@ if (typeof window !== 'undefined' && window.DEFAULT_VIEW_MODE) {
 }
 const phoneLookupTimers = {};
 const WORK_START = 9;
-const WORK_END = 18;
+const WORK_END = 19;
 const PX_PER_HOUR = 80;
 
 const q = s => document.querySelector(s);
@@ -65,15 +65,149 @@ async function loadTreatments() {
       return;
     }
     TREATMENTS = r.data || [];
-    const options = '<option value="">Сонгоогүй</option>' + 
-      TREATMENTS.map(t => `<option value="${t.id}">${esc(t.name)} (${t.sessions} удаа)</option>`).join('');
-    const selAdd = q('#treatment_id');
+    
+    // Initialize searchable treatment select
+    initTreatmentSearch();
+    
+    // Also update edit modal select
     const selEdit = q('#modalEdit select[name="treatment_id"]');
-    if (selAdd) selAdd.innerHTML = options;
-    if (selEdit) selEdit.innerHTML = options;
+    if (selEdit) {
+      const options = '<option value="">Сонгоогүй</option>' + 
+        TREATMENTS.map(t => `<option value="${t.id}">${esc(t.name)} (${t.sessions} удаа)</option>`).join('');
+      selEdit.innerHTML = options;
+    }
   } catch (e) {
     console.error('Error loading treatments:', e);
   }
+}
+
+function initTreatmentSearch() {
+  const searchInput = q('#treatment_search');
+  const dropdown = q('#treatment_dropdown');
+  const hiddenId = q('#treatment_id');
+  const hiddenCustom = q('#custom_treatment');
+  
+  if (!searchInput || !dropdown) return;
+  
+  function renderDropdown(searchTerm = '') {
+    const term = searchTerm.toLowerCase().trim();
+    let html = '';
+    
+    // Filter treatments
+    let filtered = TREATMENTS.filter(t => {
+      const name = (t.name || '').toLowerCase();
+      const category = (t.category || '').toLowerCase();
+      return name.includes(term) || category.includes(term);
+    });
+    
+    // If no search term, show all (limited to 50 for performance)
+    if (!term) {
+      filtered = filtered.slice(0, 50);
+    }
+    
+    // Show custom option if there's a search term and no exact match
+    if (term && !filtered.some(t => t.name.toLowerCase() === term)) {
+      html += `<div class="treatment-option custom-option" data-custom="${esc(searchTerm)}">
+        <i class="fas fa-plus"></i> "${esc(searchTerm)}" гэж шинээр нэмэх
+      </div>`;
+    }
+    
+    // Group by category
+    const grouped = {};
+    filtered.forEach(t => {
+      const cat = t.category || 'Бусад';
+      if (!grouped[cat]) grouped[cat] = [];
+      grouped[cat].push(t);
+    });
+    
+    // Show filtered treatments grouped by category
+    Object.keys(grouped).sort().forEach(cat => {
+      if (Object.keys(grouped).length > 1) {
+        html += `<div class="treatment-category">${esc(cat)}</div>`;
+      }
+      grouped[cat].forEach(t => {
+        const price = t.price > 0 ? `<span class="treatment-price">${Number(t.price).toLocaleString()}₮</span>` : '';
+        html += `<div class="treatment-option" data-id="${t.id}" data-name="${esc(t.name)}" data-price="${t.price || 0}">
+          <span class="treatment-name">${esc(t.name)} <small>(${t.sessions} удаа)</small></span>
+          ${price}
+        </div>`;
+      });
+    });
+    
+    if (!html) {
+      html = '<div class="treatment-option no-result">Олдсонгүй. Бичээд нэмнэ үү.</div>';
+    }
+    
+    dropdown.innerHTML = html;
+  }
+  
+  // Show dropdown on focus
+  searchInput.addEventListener('focus', () => {
+    renderDropdown(searchInput.value);
+    dropdown.classList.add('show');
+  });
+  
+  // Filter on input
+  searchInput.addEventListener('input', () => {
+    renderDropdown(searchInput.value);
+    dropdown.classList.add('show');
+    // Clear hidden fields when typing
+    hiddenId.value = '';
+    hiddenCustom.value = searchInput.value;
+  });
+  
+  // Handle option click
+  dropdown.addEventListener('click', (e) => {
+    const opt = e.target.closest('.treatment-option');
+    if (!opt || opt.style.cursor === 'default') return;
+    
+    if (opt.dataset.custom) {
+      // Custom treatment
+      searchInput.value = opt.dataset.custom;
+      hiddenId.value = '';
+      hiddenCustom.value = opt.dataset.custom;
+    } else if (opt.dataset.id) {
+      // Existing treatment
+      searchInput.value = opt.dataset.name;
+      hiddenId.value = opt.dataset.id;
+      hiddenCustom.value = '';
+    }
+    
+    dropdown.classList.remove('show');
+    searchInput.classList.remove('input-error');
+  });
+  
+  // Hide dropdown on outside click
+  document.addEventListener('click', (e) => {
+    if (!e.target.closest('.treatment-select-wrapper')) {
+      dropdown.classList.remove('show');
+    }
+  });
+  
+  // Keyboard navigation
+  searchInput.addEventListener('keydown', (e) => {
+    const options = dropdown.querySelectorAll('.treatment-option:not([style*="cursor:default"])');
+    const active = dropdown.querySelector('.treatment-option.active');
+    let idx = Array.from(options).indexOf(active);
+    
+    if (e.key === 'ArrowDown') {
+      e.preventDefault();
+      if (idx < options.length - 1) idx++;
+      options.forEach(o => o.classList.remove('active'));
+      if (options[idx]) options[idx].classList.add('active');
+    } else if (e.key === 'ArrowUp') {
+      e.preventDefault();
+      if (idx > 0) idx--;
+      options.forEach(o => o.classList.remove('active'));
+      if (options[idx]) options[idx].classList.add('active');
+    } else if (e.key === 'Enter') {
+      e.preventDefault();
+      if (active) active.click();
+      else if (options[0]) options[0].click();
+    } else if (e.key === 'Escape') {
+      dropdown.classList.remove('show');
+    }
+  });
 }
 
 async function loadDoctors() {
@@ -152,7 +286,10 @@ function renderDayView(date, events) {
   q('#dateLabel').textContent = `Өдөр: ${date}`;
   const timeCol = q('#timeCol');
   timeCol.innerHTML = '';
-  for (let h = WORK_START; h <= WORK_END; h++) {
+  // 09:00-18:00 = 9 rows (09,10,11,12,13,14,15,16,17) - 18:00 is end time, not a row
+  const totalHours = WORK_END - WORK_START;
+  const gridHeight = totalHours * PX_PER_HOUR;
+  for (let h = WORK_START; h < WORK_END; h++) {
     timeCol.innerHTML += `<div style="height:${PX_PER_HOUR}px;line-height:${PX_PER_HOUR}px;padding-left:8px;font-weight:600;color:#64748b;font-size:0.8rem;">${String(h).padStart(2, '0')}:00</div>`;
   }
   const row = q('#calendarRow');
@@ -167,12 +304,14 @@ function renderDayView(date, events) {
     const todayWorkHours = d.working_hours?.find(wh => parseInt(wh.day_of_week) === dayOfWeek);
     let workLabel = `${String(WORK_START).padStart(2, '0')}:00–${String(WORK_END).padStart(2, '0')}:00`;
     if (todayWorkHours) {
-      workLabel = parseInt(todayWorkHours.is_available) === 1 ? `${todayWorkHours.start_time}–${todayWorkHours.end_time}` : 'Ажиллахгүй';
+      const st = todayWorkHours.start_time?.slice(0,5) || '09:00';
+      const et = todayWorkHours.end_time?.slice(0,5) || '18:00';
+      workLabel = parseInt(todayWorkHours.is_available) === 1 ? `${st}–${et}` : 'Ажиллахгүй';
     }
     col.innerHTML = `<div class="head" style="background: linear-gradient(135deg, #f8fafc 0%, #f1f5f9 100%); border-bottom: 2px solid #e2e8f0;"><div style="font-weight: 700; margin-bottom: 0.5rem; color: #1e293b;"><i class="fas fa-user-md" style="color: ${docColor}; margin-right: 0.5rem;"></i>${esc(d.name)}</div><span class="badge" style="background: #dcfce7; color: #16a34a; border: 1px solid #86efac; padding: 0.35rem 0.7rem; font-size: 0.75rem; font-weight: 600;">${workLabel}</span></div><div class="calendar-hours position-relative"><div class="calendar-grid"></div></div>`;
     const hoursEl = col.querySelector('.calendar-hours');
-    // Force consistent hours column height - 800px for 10 hour rows (09-18 inclusive)
-    hoursEl.style.height = '800px';
+    // Force consistent hours column height
+    hoursEl.style.height = `${gridHeight}px`;
     hoursEl.style.overflow = 'visible';
     const calendarGrid = col.querySelector('.calendar-grid');
     if (calendarGrid) {
@@ -180,7 +319,7 @@ function renderDayView(date, events) {
       calendarGrid.style.left = '0';
       calendarGrid.style.right = '0';
       calendarGrid.style.top = '0';
-      calendarGrid.style.height = '800px';
+      calendarGrid.style.height = `${gridHeight}px`;
       calendarGrid.style.pointerEvents = 'none';
       // Light gray hour lines for the light theme
       calendarGrid.style.background = `repeating-linear-gradient(to bottom, #e2e8f0 0px, #e2e8f0 1px, transparent 1px, transparent ${PX_PER_HOUR}px)`;
@@ -191,9 +330,8 @@ function renderDayView(date, events) {
       const startH = todayWorkHours.start_time;
       const endH = todayWorkHours.end_time;
       const startPx = Math.max(0, hoursToY(startH));
-      // Calculate end position based on actual end time from working_hours
+      // Calculate end position - add 1px buffer to ensure full coverage
       const endPx = hoursToY(endH);
-      console.log('WORKING HOURS:', d.name, 'start:', startH, 'end:', endH, 'startPx:', startPx, 'endPx:', endPx);
       if (endPx > startPx + 2) {
         const workEl = document.createElement('div');
         workEl.style.position = 'absolute';
@@ -299,7 +437,10 @@ function renderWeekView(startDate, endDate, events) {
   q('#dateLabel').textContent = `Долоо хоног: ${fmtDate(startDate)} – ${fmtDate(endDate)}`;
   const timeCol = q('#timeCol');
   timeCol.innerHTML = '';
-  for (let h = WORK_START; h <= WORK_END; h++) {
+  // 09:00-18:00 = 9 rows - 18:00 is end time
+  const totalHours = WORK_END - WORK_START;
+  const gridHeight = totalHours * PX_PER_HOUR;
+  for (let h = WORK_START; h < WORK_END; h++) {
     timeCol.innerHTML += `<div style="height:${PX_PER_HOUR}px;line-height:${PX_PER_HOUR}px;padding-left:8px;font-weight:600;color:#64748b;font-size:0.8rem;">${String(h).padStart(2, '0')}:00</div>`;
   }
   const row = q('#calendarRow');
@@ -320,8 +461,8 @@ function renderWeekView(startDate, endDate, events) {
     const headerBorder = isToday ? '#8b5cf6' : '#e2e8f0';
     col.innerHTML = `<div class="head text-center" style="background: ${headerBg}; border-bottom: 2px solid ${headerBorder};"><strong style="color: ${headerColor}; display: block; margin-bottom: 0.25rem; font-size: 0.95rem;">${names[i]}</strong><small style="color: ${isToday ? '#7c3aed' : '#64748b'}; font-weight: 500;">${ds}</small></div><div class="calendar-hours position-relative"><div class="calendar-grid"></div></div>`;
     const hoursEl = col.querySelector('.calendar-hours');
-    // Force consistent hours column height - 800px for 10 hour rows (09-18 inclusive)
-    hoursEl.style.height = '800px';
+    // Force consistent hours column height
+    hoursEl.style.height = `${gridHeight}px`;
     hoursEl.style.overflow = 'visible';
     const calendarGrid = col.querySelector('.calendar-grid');
     if (calendarGrid) {
@@ -329,7 +470,7 @@ function renderWeekView(startDate, endDate, events) {
       calendarGrid.style.left = '0';
       calendarGrid.style.right = '0';
       calendarGrid.style.top = '0';
-      calendarGrid.style.height = '800px';
+      calendarGrid.style.height = `${gridHeight}px`;
       calendarGrid.style.pointerEvents = 'none';
       // Light gray hour lines for the light theme
       calendarGrid.style.background = `repeating-linear-gradient(to bottom, #e2e8f0 0px, #e2e8f0 1px, transparent 1px, transparent ${PX_PER_HOUR}px)`;
@@ -707,23 +848,60 @@ document.addEventListener('DOMContentLoaded', async () => {
     const f = e.target;
     const phoneField = f.querySelector('#phone');
     const phoneVal = phoneField ? phoneField.value.trim() : '';
-    const treatmentField = f.querySelector('#treatment_id');
-    const treatmentId = +(treatmentField?.value || 0);
+    const treatmentIdField = f.querySelector('#treatment_id');
+    const customTreatmentField = f.querySelector('#custom_treatment');
+    const treatmentSearchField = f.querySelector('#treatment_search');
+    const treatmentId = +(treatmentIdField?.value || 0);
+    const customTreatment = customTreatmentField?.value?.trim() || '';
+    
     if (!phoneVal) { phoneField?.classList.add('input-error'); phoneField?.focus(); showNotification('Утасны дугаар оруулна уу'); return; }
     phoneField?.classList.remove('input-error');
-    if (!treatmentId) { treatmentField?.classList.add('input-error'); treatmentField?.focus(); showNotification('Эмчилгээний төрөл сонгоно уу'); return; }
-    treatmentField?.classList.remove('input-error');
+    
+    // Validate treatment - either selected or custom entered
+    if (!treatmentId && !customTreatment) { 
+      treatmentSearchField?.classList.add('input-error'); 
+      treatmentSearchField?.focus(); 
+      showNotification('Эмчилгээний төрөл сонгох эсвэл бичнэ үү'); 
+      return; 
+    }
+    treatmentSearchField?.classList.remove('input-error');
+    
     if (typeof f.reportValidity === 'function' && !f.reportValidity()) return;
+    
     // Get treatment name for service_name field
-    const selectedTreatment = TREATMENTS.find(t => t.id == treatmentId);
-    const serviceName = selectedTreatment ? selectedTreatment.name : '';
-    const payload = { action: 'add', clinic: CURRENT_CLINIC, doctor_id: +f.querySelector('#doctor_id').value, date: f.querySelector('#date').value, start_time: f.querySelector('#start_time').value, end_time: f.querySelector('#end_time').value, patient_name: f.querySelector('#patient_name').value.trim(), phone: phoneVal, status: f.querySelector('#status').value || 'online', service_name: serviceName, gender: f.querySelector('#gender')?.value || '', visit_count: +(f.querySelector('#visit_count')?.value || 1), note: (f.querySelector('#note')?.value || '').trim(), treatment_id: treatmentId };
+    let serviceName = customTreatment;
+    if (treatmentId) {
+      const selectedTreatment = TREATMENTS.find(t => t.id == treatmentId);
+      serviceName = selectedTreatment ? selectedTreatment.name : '';
+    }
+    
+    const payload = { 
+      action: 'add', 
+      clinic: CURRENT_CLINIC, 
+      doctor_id: +f.querySelector('#doctor_id').value, 
+      date: f.querySelector('#date').value, 
+      start_time: f.querySelector('#start_time').value, 
+      end_time: f.querySelector('#end_time').value, 
+      patient_name: f.querySelector('#patient_name').value.trim(), 
+      phone: phoneVal, 
+      status: f.querySelector('#status').value || 'online', 
+      service_name: serviceName, 
+      gender: f.querySelector('#gender')?.value || '', 
+      visit_count: +(f.querySelector('#visit_count')?.value || 1), 
+      note: (f.querySelector('#note')?.value || '').trim(), 
+      treatment_id: treatmentId || null,
+      custom_treatment: customTreatment
+    };
     try {
       const r = await fetch(`api.php?action=create`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) });
       const j = await r.json();
       if (!j?.ok) { showNotification(`Алдаа: ${j?.msg || 'Алдаа'}`); return; }
       hideModal('#modalAdd');
       f.reset();
+      // Clear treatment search field
+      if (treatmentSearchField) treatmentSearchField.value = '';
+      if (treatmentIdField) treatmentIdField.value = '';
+      if (customTreatmentField) customTreatmentField.value = '';
       await loadBookings();
       showNotification(`✅ ${j?.msg || 'Шинэ захиалга амжилттай нэмэгдлээ'}`);
     } catch (err) {

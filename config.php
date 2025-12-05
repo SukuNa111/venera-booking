@@ -6,7 +6,36 @@
 
 date_default_timezone_set('Asia/Ulaanbaatar');
 
+// -----------------------
+// Load Environment Variables
+// -----------------------
+$envFile = __DIR__ . '/.env';
+if (file_exists($envFile)) {
+    $lines = file($envFile, FILE_IGNORE_NEW_LINES | FILE_SKIP_EMPTY_LINES);
+    foreach ($lines as $line) {
+        if (strpos(trim($line), '#') === 0) continue;
+        if (strpos($line, '=') === false) continue;
+        list($key, $value) = explode('=', $line, 2);
+        $key = trim($key);
+        $value = trim($value);
+        if (!getenv($key)) {
+            putenv("$key=$value");
+        }
+    }
+}
+
+// -----------------------
+// Security Settings
+// -----------------------
+$isProduction = getenv('APP_ENV') === 'production';
+$isDebug = getenv('APP_DEBUG') === 'true';
+
+// Session Security
 if (session_status() !== PHP_SESSION_ACTIVE) {
+    ini_set('session.cookie_httponly', 1);
+    ini_set('session.cookie_secure', $isProduction ? 1 : 0);
+    ini_set('session.use_strict_mode', 1);
+    ini_set('session.cookie_samesite', 'Strict');
     session_start();
 }
 
@@ -15,7 +44,7 @@ if (session_status() !== PHP_SESSION_ACTIVE) {
 // -----------------------
 // PostgreSQL connection - Supports both Docker and Local
 define('DB_TYPE', 'pgsql');
-define('DB_HOST', getenv('DB_HOST') ?: '192.168.1.94');
+define('DB_HOST', getenv('DB_HOST') ?: 'localhost');
 define('DB_PORT', getenv('DB_PORT') ?: 5432);
 define('DB_NAME', getenv('DB_NAME') ?: 'hospital_db');
 define('DB_USER', getenv('DB_USER') ?: 'postgres');
@@ -116,8 +145,14 @@ function sendSMS($phone, $message, $booking_id = null) {
     $response = null;
     $errorDetail = '';
     
-    // Skytel WEB2SMS API token
-    $skytelToken = '4d5a863d5a97a5f56d01a4e3912caafa356f2311';
+    // Check if SMS is enabled
+    if (getenv('SMS_ENABLED') === 'false') {
+        logSMS($booking_id, $phone, $message, 'disabled', 0, null, 'SMS disabled');
+        return ['ok' => true, 'status' => 'disabled'];
+    }
+    
+    // Skytel WEB2SMS API token from environment
+    $skytelToken = getenv('SMS_TOKEN') ?: '4d5a863d5a97a5f56d01a4e3912caafa356f2311';
     
     // Format phone number (8 digit Mongolian number)
     $phoneClean = preg_replace('/\D/', '', $phone);
