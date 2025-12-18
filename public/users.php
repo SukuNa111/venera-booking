@@ -173,12 +173,21 @@ if ($action === 'update') {
                     }
                 }
             } else {
-                // If role changed from doctor to something else, remove doctor record
-                // and associated working hours
-                $stDocDel = db()->prepare("DELETE FROM doctors WHERE id=?");
-                $stDocDel->execute([$id]);
+                // If role changed from doctor to something else, check for bookings first
+                $stCheck = db()->prepare("SELECT COUNT(*) as cnt FROM bookings WHERE doctor_id = ?");
+                $stCheck->execute([$id]);
+                $bookingCount = $stCheck->fetch()['cnt'] ?? 0;
+                
+                if ($bookingCount > 0) {
+                    echo json_encode(['ok' => false, 'msg' => "Энэ эмчтэй холбоотой $bookingCount захиалга байна. Role солих боломжгүй."]);
+                    exit;
+                }
+                
+                // Remove doctor record and associated working hours
                 $stWhDel = db()->prepare("DELETE FROM working_hours WHERE doctor_id=?");
                 $stWhDel->execute([$id]);
+                $stDocDel = db()->prepare("DELETE FROM doctors WHERE id=?");
+                $stDocDel->execute([$id]);
             }
             echo json_encode(['ok' => true, 'msg' => 'Хэрэглэгч амжилттай засагдлаа']);
         } catch (Exception $e) {
@@ -195,14 +204,26 @@ if ($action === 'update') {
 
         if ($id) {
             try {
+                // Check if doctor has any bookings
+                $stCheck = db()->prepare("SELECT COUNT(*) as cnt FROM bookings WHERE doctor_id = ?");
+                $stCheck->execute([$id]);
+                $bookingCount = $stCheck->fetch()['cnt'] ?? 0;
+                
+                if ($bookingCount > 0) {
+                    echo json_encode(['ok' => false, 'msg' => "Энэ хэрэглэгчтэй холбоотой $bookingCount захиалга байна. Эхлээд захиалгуудыг устгана уу."]);
+                    exit;
+                }
+                
+                // Delete working hours first
+                $stDelWh = db()->prepare("DELETE FROM working_hours WHERE doctor_id=?");
+                $stDelWh->execute([$id]);
+                // Delete doctor record
+                $stDelDoc = db()->prepare("DELETE FROM doctors WHERE id=?");
+                $stDelDoc->execute([$id]);
                 // Delete user record
                 $stDelUser = db()->prepare("DELETE FROM users WHERE id=?");
                 $stDelUser->execute([$id]);
-                // If a doctor exists with this id, remove doctor and working hours
-                $stDelDoc = db()->prepare("DELETE FROM doctors WHERE id=?");
-                $stDelDoc->execute([$id]);
-                $stDelWh = db()->prepare("DELETE FROM working_hours WHERE doctor_id=?");
-                $stDelWh->execute([$id]);
+                
                 echo json_encode(['ok' => true, 'msg' => 'Хэрэглэгч амжилттай устгагдлаа']);
             } catch (Exception $e) {
                 echo json_encode(['ok' => false, 'msg' => $e->getMessage()]);

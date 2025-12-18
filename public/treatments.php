@@ -3,9 +3,79 @@ require_once __DIR__ . '/../config.php';
 require_login();
 require_role(['admin', 'reception']);
 
-// Get categories for filter
-$categories = db()->query("SELECT DISTINCT category FROM treatments WHERE category IS NOT NULL AND category != '' ORDER BY category")->fetchAll(PDO::FETCH_COLUMN);
-$treatments = db()->query("SELECT * FROM treatments ORDER BY category, name")->fetchAll(PDO::FETCH_ASSOC);
+$currentUser = current_user();
+$role = $currentUser['role'] ?? '';
+
+// Small helper to safely detect column existence (for older schemas)
+function column_exists_local($table, $column) {
+  try {
+    $st = db()->prepare("SELECT 1 FROM information_schema.columns WHERE table_name = ? AND column_name = ? LIMIT 1");
+    $st->execute([$table, $column]);
+    return (bool)$st->fetchColumn();
+  } catch (Exception $e) {
+    return false;
+  }
+}
+
+$hasClinicCol = column_exists_local('treatments', 'clinic');
+
+// Clinics list
+$clinics = [];
+try {
+  $clinics = db()->query("SELECT code, name FROM clinics WHERE active=1 ORDER BY sort_order, name")->fetchAll(PDO::FETCH_ASSOC);
+} catch (Exception $e) {
+  $clinics = [];
+}
+$clinicNames = [];
+foreach ($clinics as $c) {
+  $clinicNames[$c['code']] = $c['name'];
+}
+
+// Apply clinic filter: admins can switch; others fixed to their clinic
+if ($role === 'admin') {
+  $clinicFilter = trim($_GET['clinic'] ?? '');
+} else {
+  $clinicFilter = trim($currentUser['clinic_id'] ?? '');
+}
+
+// If treatments.clinic column is missing, disable clinic filter to avoid SQL errors
+if (!$hasClinicCol) {
+  $clinicFilter = '';
+}
+
+// Categories filtered by clinic
+$catSql = "SELECT DISTINCT category FROM treatments";
+$catWhere = ["category IS NOT NULL", "category != ''"];
+$params = [];
+if ($hasClinicCol && $clinicFilter !== '') {
+  $catWhere[] = "(clinic = :clinic OR clinic IS NULL OR clinic = '')";
+  $params[':clinic'] = $clinicFilter;
+}
+if ($catWhere) {
+  $catSql .= ' WHERE ' . implode(' AND ', $catWhere);
+}
+$catSql .= ' ORDER BY category';
+$catStmt = db()->prepare($catSql);
+if (isset($params[':clinic'])) $catStmt->bindValue(':clinic', $params[':clinic']);
+$catStmt->execute();
+$categories = $catStmt->fetchAll(PDO::FETCH_COLUMN);
+
+// Treatments filtered by clinic
+$treatSql = "SELECT * FROM treatments";
+$treatWhere = [];
+if ($hasClinicCol && $clinicFilter !== '') {
+  $treatWhere[] = "(clinic = :clinic OR clinic IS NULL OR clinic = '')";
+  $params[':clinic'] = $clinicFilter;
+}
+if ($treatWhere) {
+  $treatSql .= ' WHERE ' . implode(' AND ', $treatWhere);
+}
+$treatSql .= ' ORDER BY category, name';
+$treatStmt = db()->prepare($treatSql);
+if (isset($params[':clinic'])) $treatStmt->bindValue(':clinic', $params[':clinic']);
+$treatStmt->execute();
+$treatments = $treatStmt->fetchAll(PDO::FETCH_ASSOC);
+
 $scheduled = db()->query("SELECT s.*, b.patient_name FROM sms_schedule s LEFT JOIN bookings b ON s.booking_id = b.id ORDER BY s.scheduled_at DESC LIMIT 50")->fetchAll(PDO::FETCH_ASSOC);
 ?>
 <!DOCTYPE html>
@@ -227,6 +297,18 @@ $scheduled = db()->query("SELECT s.*, b.patient_name FROM sms_schedule s LEFT JO
         <option value="<?= htmlspecialchars($cat) ?>"><?= htmlspecialchars($cat) ?></option>
         <?php endforeach; ?>
       </select>
+      <?php if ($role === 'admin'): ?>
+        <select id="clinicFilter" onchange="onClinicChange(this.value)">
+          <option value="" <?= $clinicFilter === '' ? 'selected' : '' ?>>Бүх эмнэлэг</option>
+          <?php foreach ($clinics as $c): ?>
+          <option value="<?= htmlspecialchars($c['code']) ?>" <?= $clinicFilter === $c['code'] ? 'selected' : '' ?>><?= htmlspecialchars($c['name']) ?></option>
+          <?php endforeach; ?>
+        </select>
+      <?php else: ?>
+        <div style="font-weight:600;color:#334155;display:flex;align-items:center;gap:8px;">
+          <span style="padding:8px 12px;background:#e0e7ff;border-radius:10px;"><?= htmlspecialchars($clinicNames[$clinicFilter] ?? 'Миний эмнэлэг') ?></span>
+        </div>
+      <?php endif; ?>
       <button class="btn btn-primary" onclick="openAddModal()"><i class="fas fa-plus"></i> Шинэ нэмэх</button>
     </div>
     
@@ -243,6 +325,7 @@ $scheduled = db()->query("SELECT s.*, b.patient_name FROM sms_schedule s LEFT JO
             <tr>
               <th>Эмчилгээ</th>
               <th>Ангилал</th>
+              <th>Эмнэлэг</th>
               <th>Үнэ</th>
               <th>Үзлэг</th>
               <th>Завсар</th>
@@ -265,6 +348,13 @@ $scheduled = db()->query("SELECT s.*, b.patient_name FROM sms_schedule s LEFT JO
                 <span class="badge badge-category"><?= htmlspecialchars($t['category']) ?></span>
                 <?php else: ?>
                 <span style="color:#94a3b8">-</span>
+                <?php endif; ?>
+              </td>
+              <td>
+                <?php if (!empty($t['clinic'])): ?>
+                <span class="badge badge-category"><?= htmlspecialchars($clinicNames[$t['clinic']] ?? $t['clinic']) ?></span>
+                <?php else: ?>
+                <span style="color:#94a3b8">Бүх</span>
                 <?php endif; ?>
               </td>
               <td>
@@ -410,9 +500,17 @@ $scheduled = db()->query("SELECT s.*, b.patient_name FROM sms_schedule s LEFT JO
           <input type="number" name="price" id="treatmentPrice" value="0" min="0" step="1000">
         </div>
         <div class="form-group">
+          <label>Хугацаа (мин)</label>
+          <input type="number" name="duration_minutes" id="treatmentDuration" value="30" min="10" step="5">
+          <small>Үзлэгийн үргэлжлэх хугацаа</small>
+        </div>
+        <div class="form-group">
           <label>Үзлэгийн тоо</label>
           <input type="number" name="sessions" id="treatmentSessions" value="1" min="1">
         </div>
+      </div>
+      
+      <div class="form-row">
         <div class="form-group">
           <label>Завсарлага (хоног)</label>
           <input type="number" name="interval_days" id="treatmentInterval" value="0" min="0">
@@ -446,6 +544,29 @@ $scheduled = db()->query("SELECT s.*, b.patient_name FROM sms_schedule s LEFT JO
         </div>
       </div>
       
+      <div class="form-row">
+        <div class="form-group">
+          <label>Эмнэлэг</label>
+          <select name="clinic" id="treatmentClinic" <?= $role === 'admin' ? '' : 'disabled' ?>>
+            <?php foreach ($clinics as $c): ?>
+            <option value="<?= htmlspecialchars($c['code']) ?>" <?= $clinicFilter === $c['code'] ? 'selected' : '' ?>>
+              <?= htmlspecialchars($c['name']) ?>
+            </option>
+            <?php endforeach; ?>
+          </select>
+          <?php if ($role !== 'admin'): ?>
+            <input type="hidden" name="clinic" value="<?= htmlspecialchars($clinicFilter) ?>">
+          <?php endif; ?>
+          <small><?= $role === 'admin' ? 'Админ эмнэлэг сонгож болно' : 'Таны эмнэлэгт хадгална' ?></small>
+        </div>
+        <div class="form-group">
+          <label>Үнэ гараар оруулах</label>
+          <div style="margin-top:8px">
+            <label style="font-weight:600"><input type="checkbox" id="priceEditable" name="price_editable"> Гар утгаар оруулна</label>
+          </div>
+        </div>
+      </div>
+
       <div class="form-actions">
         <button type="button" onclick="closeModal()" class="btn btn-secondary">Болих</button>
         <button type="submit" class="btn btn-primary"><i class="fas fa-save"></i> Хадгалах</button>
@@ -462,6 +583,16 @@ function showTab(tabId) {
   document.querySelectorAll('.tab-content').forEach(c => c.classList.remove('active'));
   event.target.closest('.tab').classList.add('active');
   document.getElementById(tabId).classList.add('active');
+}
+
+function onClinicChange(val) {
+  const params = new URLSearchParams(window.location.search);
+  if (val) {
+    params.set('clinic', val);
+  } else {
+    params.delete('clinic');
+  }
+  window.location.search = params.toString();
 }
 
 function filterTable() {
@@ -484,6 +615,7 @@ function openAddModal() {
   document.getElementById('treatmentForm').reset();
   document.getElementById('treatmentId').value = '';
   document.getElementById('modeAuto').checked = true;
+  try { document.getElementById('treatmentClinic').value = '<?= htmlspecialchars($clinicFilter, ENT_QUOTES) ?>'; } catch(e) {}
   document.getElementById('treatmentModal').style.display = 'flex';
 }
 
@@ -494,10 +626,14 @@ function openEditModal(t) {
   document.getElementById('treatmentName').value = t.name;
   document.getElementById('treatmentCategory').value = t.category || '';
   document.getElementById('treatmentPrice').value = t.price || 0;
+  document.getElementById('treatmentDuration').value = t.duration_minutes || 30;
   document.getElementById('treatmentSessions').value = t.sessions || 1;
   document.getElementById('treatmentInterval').value = t.interval_days || 0;
   document.getElementById('treatmentAftercareDays').value = t.aftercare_days || 0;
   document.getElementById('treatmentAftercareMsg').value = t.aftercare_message || '';
+  // set clinic and price_editable
+  try { document.getElementById('treatmentClinic').value = t.clinic || ''; } catch(e) {}
+  try { document.getElementById('priceEditable').checked = !!t.price_editable; } catch(e) {}
   
   if ((t.next_visit_mode || 'auto') === 'auto') {
     document.getElementById('modeAuto').checked = true;
@@ -521,12 +657,16 @@ async function saveTreatment(e) {
     name: form.name.value.trim(),
     category: form.category.value.trim(),
     price: parseFloat(form.price.value) || 0,
+    duration_minutes: parseInt(form.duration_minutes.value) || 30,
     sessions: parseInt(form.sessions.value) || 1,
     interval_days: parseInt(form.interval_days.value) || 0,
     next_visit_mode: form.next_visit_mode.value,
     aftercare_days: parseInt(form.aftercare_days.value) || 0,
     aftercare_message: form.aftercare_message.value.trim()
   };
+  // include clinic and price_editable
+  try { data.clinic = form.clinic.value || ''; } catch(e) { data.clinic = ''; }
+  try { data.price_editable = document.getElementById('priceEditable').checked ? 1 : 0; } catch(e) { data.price_editable = 0; }
   
   if (!data.name) {
     alert('Эмчилгээний нэр оруулна уу!');

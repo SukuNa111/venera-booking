@@ -17,169 +17,11 @@ function json_exit($arr, $code = 200) {
   exit;
 }
 
-// Transliterate Cyrillic (MN/RU) text to a Latin-only representation for SMS
-function to_latin($text) {
-  static $map = [
-    'А'=>'A','а'=>'a','Б'=>'B','б'=>'b','В'=>'V','в'=>'v','Г'=>'G','г'=>'g','Д'=>'D','д'=>'d','Е'=>'E','е'=>'e','Ё'=>'Yo','ё'=>'yo',
-    'Ж'=>'Zh','ж'=>'zh','З'=>'Z','з'=>'z','И'=>'I','и'=>'i','Й'=>'Y','й'=>'y','К'=>'K','к'=>'k','Л'=>'L','л'=>'l','М'=>'M','м'=>'m',
-    'Н'=>'N','н'=>'n','О'=>'O','о'=>'o','Ө'=>'O','ө'=>'o','П'=>'P','п'=>'p','Р'=>'R','р'=>'r','С'=>'S','с'=>'s','Т'=>'T','т'=>'t',
-    'У'=>'U','у'=>'u','Ү'=>'U','ү'=>'u','Ф'=>'F','ф'=>'f','Х'=>'Kh','х'=>'kh','Ц'=>'Ts','ц'=>'ts','Ч'=>'Ch','ч'=>'ch','Ш'=>'Sh','ш'=>'sh',
-    'Щ'=>'Sh','щ'=>'sh','Ъ'=>'','ъ'=>'','Ы'=>'Y','ы'=>'y','Ь'=>'','ь'=>'','Э'=>'E','э'=>'e','Ю'=>'Yu','ю'=>'yu','Я'=>'Ya','я'=>'ya'
-  ];
-  $out = strtr((string)$text, $map);
-  // Keep digits, punctuation, and ASCII letters; strip the rest
-  return preg_replace('/[^A-Za-z0-9@#\/:.,\-\s]/', '', $out);
-}
-
-// Template renderer that replaces {placeholders} with provided variables
-function render_template($tpl, array $vars) {
-  return preg_replace_callback('/\{(\w+)\}/', function($m) use ($vars) {
-    $key = $m[1];
-    return array_key_exists($key, $vars) ? $vars[$key] : $m[0];
-  }, (string)$tpl);
-}
-
-// Simple column existence check (cached) to avoid errors on older schemas
-function column_exists($table, $column) {
-  static $cache = [];
-  $key = strtolower($table) . '.' . strtolower($column);
-  if (isset($cache[$key])) return $cache[$key];
-  try {
-    $st = db()->prepare("SELECT 1 FROM information_schema.columns WHERE table_name = ? AND column_name = ? LIMIT 1");
-    $st->execute([$table, $column]);
-    $cache[$key] = (bool)$st->fetchColumn();
-  } catch (Exception $e) {
-    $cache[$key] = false;
-  }
-  return $cache[$key];
-}
-
-// Fetch clinic details (DB first, then config fallback)
-function load_clinic_info($code) {
-  $code = trim($code ?: 'venera');
-  $info = [
-    'code' => $code,
-    'clinic_name' => $code,
-    'phone1' => '',
-    'phone2' => '',
-    'clinic_contacts' => '',
-    'clinic_map' => '',
-    'clinic_address' => ''
-  ];
-
-  try {
-    // Build a safe SELECT that works even if phone1/phone2 are missing
-    $hasPhone1 = column_exists('clinics', 'phone1');
-    $hasPhone2 = column_exists('clinics', 'phone2');
-    $hasAddress = column_exists('clinics', 'address');
-    $hasMap = column_exists('clinics', 'map_link');
-
-    $select = [
-      'name',
-      'phone',
-      'phone_alt',
-      $hasPhone1 ? 'phone1' : "NULL AS phone1",
-      $hasPhone2 ? 'phone2' : "NULL AS phone2",
-      $hasAddress ? 'address' : "NULL AS address",
-      $hasMap ? 'map_link' : "NULL AS map_link"
-    ];
-
-    $sql = 'SELECT ' . implode(', ', $select) . ' FROM clinics WHERE code=? LIMIT 1';
-    $st = db()->prepare($sql);
-    $st->execute([$code]);
-    if ($row = $st->fetch(PDO::FETCH_ASSOC)) {
-      $info['clinic_name'] = $row['name'] ?: $info['clinic_name'];
-      $info['phone1'] = trim($row['phone1'] ?? '') ?: trim($row['phone'] ?? '');
-      $info['phone2'] = trim($row['phone2'] ?? '') ?: trim($row['phone_alt'] ?? '');
-      $info['clinic_address'] = trim($row['address'] ?? '');
-      $info['clinic_map'] = trim($row['map_link'] ?? '');
-    }
-  } catch (Exception $e) {
-    // ignore DB errors here, fall back to config
-  }
-
-  // Fallback to config directory when DB values are missing
-  $fallback = get_clinic_metadata($code);
-  if (empty($info['clinic_name']) && !empty($fallback['name'])) $info['clinic_name'] = $fallback['name'];
-  if (empty($info['phone1']) && !empty($fallback['phone1'])) $info['phone1'] = $fallback['phone1'];
-  if (empty($info['phone2']) && !empty($fallback['phone2'])) $info['phone2'] = $fallback['phone2'];
-  if (empty($info['clinic_address']) && !empty($fallback['address'])) $info['clinic_address'] = $fallback['address'];
-  if (empty($info['clinic_map']) && !empty($fallback['map'])) $info['clinic_map'] = $fallback['map'];
-
-  $contacts = trim($info['phone1']);
-  if (!empty($info['phone2'])) {
-    $contacts .= ($contacts ? ' / ' : '') . $info['phone2'];
-  }
-  $info['clinic_contacts'] = $contacts;
-
-  return $info;
-}
-
-// Detect if bookings.clinic_id column exists (avoids hard failure on older schemas)
-function has_booking_clinic_id_column() {
-  static $hasColumn = null;
-  if ($hasColumn !== null) return $hasColumn;
-  try {
-    $chk = db()->prepare("SELECT 1 FROM information_schema.columns WHERE table_name = 'bookings' AND column_name = 'clinic_id' LIMIT 1");
-    $chk->execute();
-    $hasColumn = (bool)$chk->fetchColumn();
-  } catch (Exception $e) {
-    $hasColumn = false;
-  }
-  return $hasColumn;
-}
-
-function has_booking_clinic_column() {
-  static $hasColumn = null;
-  if ($hasColumn !== null) return $hasColumn;
-  $hasColumn = column_exists('bookings', 'clinic');
-  return $hasColumn;
-}
-
-function has_treatment_clinic_column() {
-  static $hasColumn = null;
-  if ($hasColumn !== null) return $hasColumn;
-  $hasColumn = column_exists('treatments', 'clinic');
-  return $hasColumn;
-}
-
-function has_treatment_price_editable_column() {
-  static $hasColumn = null;
-  if ($hasColumn !== null) return $hasColumn;
-  $hasColumn = column_exists('treatments', 'price_editable');
-  return $hasColumn;
-}
-
 // Public API: treatments (no login required)
 if ($action === 'treatments' && $_SERVER['REQUEST_METHOD']==='GET') {
   try {
-    $clinic = $_GET['clinic'] ?? null;
-    $hasClinicCol = has_treatment_clinic_column();
-    $hasPriceEditable = has_treatment_price_editable_column();
-    $priceEditableSelect = $hasPriceEditable ? 'COALESCE(price_editable,0) AS price_editable' : '0 AS price_editable';
-
-    // If clinic not provided but user is logged-in, restrict to their clinic (doctor/reception)
-    if (!$clinic && $hasClinicCol) {
-      try {
-        $cu = current_user();
-        $role = $cu['role'] ?? '';
-        if (in_array($role, ['doctor','reception'])) {
-          $clinic = $cu['clinic_id'] ?? null;
-        }
-      } catch (Exception $e) {
-        // ignore
-      }
-    }
-
-    if ($clinic && $hasClinicCol) {
-      $st = db()->prepare("SELECT id, name, category, price, sessions, interval_days, next_visit_mode, aftercare_days, aftercare_message, clinic, {$priceEditableSelect} FROM treatments WHERE (clinic IS NULL OR clinic = '') OR clinic = ? ORDER BY category, name");
-      $st->execute([$clinic]);
-    } else {
-      // No clinic filter or column not present: return all treatments
-      $st = db()->prepare("SELECT id, name, category, price, sessions, interval_days, next_visit_mode, aftercare_days, aftercare_message, " . ($hasClinicCol ? 'clinic' : "NULL AS clinic") . ", {$priceEditableSelect} FROM treatments ORDER BY category, name");
-      $st->execute();
-    }
-
+    $st = db()->prepare("SELECT id, name, category, price, sessions, interval_days, next_visit_mode, aftercare_days, aftercare_message FROM treatments ORDER BY category, name");
+    $st->execute();
     $treatments = $st->fetchAll();
     json_exit(['ok'=>true, 'data'=>$treatments]);
   } catch (Exception $e) {
@@ -218,60 +60,49 @@ if ($action === 'doctor_working_hours' && $_SERVER['REQUEST_METHOD']==='GET') {
 /* =========================
    UPDATE MY HOURS (DOCTOR SELF)
    ========================= */
-if ($action === 'update_treatment' && $_SERVER['REQUEST_METHOD']==='POST') {
+if ($action === 'update_my_hours' && $_SERVER['REQUEST_METHOD']==='POST') {
   try {
-    require_role(['admin', 'reception']);
-    $in = json_decode(file_get_contents('php://input'), true) ?: [];
-    
-    $id = (int)($in['id'] ?? 0);
-    $name = trim($in['name'] ?? '');
-    $category = trim($in['category'] ?? '');
-    $price = (float)($in['price'] ?? 0);
-    $duration_minutes = (int)($in['duration_minutes'] ?? 30);
-    $sessions = (int)($in['sessions'] ?? 1);
-    $interval_days = (int)($in['interval_days'] ?? 0);
-    $next_visit_mode = in_array($in['next_visit_mode'] ?? '', ['auto', 'manual']) ? $in['next_visit_mode'] : 'auto';
-    $aftercare_days = (int)($in['aftercare_days'] ?? 0);
-    $aftercare_message = trim($in['aftercare_message'] ?? '');
-    $clinic = trim($in['clinic'] ?? '') ?: null;
-    $price_editable = isset($in['price_editable']) ? (int)$in['price_editable'] : 0;
-    $hasClinicCol = has_treatment_clinic_column();
-    $hasPriceEditable = has_treatment_price_editable_column();
-    
-    if (!$id || !$name) {
-      json_exit(['ok'=>false, 'msg'=>'ID болон нэр заавал шаардлагатай'], 422);
-    }
-    
-    $sets = [
-      'name = ?',
-      'category = ?',
-      'price = ?',
-      'duration_minutes = ?',
-      'sessions = ?',
-      'interval_days = ?',
-      'next_visit_mode = ?',
-      'aftercare_days = ?',
-      'aftercare_message = ?'
-    ];
-    $params = [$name, $category, $price, $duration_minutes, $sessions, $interval_days, $next_visit_mode, $aftercare_days, $aftercare_message];
+    require_role(['doctor','admin']);
+    $userId = (int)($_SESSION['uid'] ?? 0);
+    if (!$userId) json_exit(['ok'=>false,'msg'=>'Нэвтэрхий байхгүй байна.'],401);
 
-    if ($hasClinicCol) {
-      $sets[] = 'clinic = ?';
-      $params[] = $clinic;
-    }
-    if ($hasPriceEditable) {
-      $sets[] = 'price_editable = ?';
-      $params[] = $price_editable;
+    $payload = json_decode(file_get_contents('php://input'), true) ?? [];
+    $hours = $payload['hours'] ?? [];
+
+    if (!is_array($hours) || count($hours) !== 7) {
+      json_exit(['ok'=>false,'msg'=>'7 хоногийн мэдээлэл дамжуулна уу.'],422);
     }
 
-    $params[] = $id;
-    $sql = 'UPDATE treatments SET ' . implode(', ', $sets) . ' WHERE id = ?';
-    $upd = db()->prepare($sql);
-    $upd->execute($params);
-    
-    json_exit(['ok'=>true, 'msg'=>'Эмчилгээ шинэчлэгдлээ']);
+    $del = db()->prepare("DELETE FROM working_hours WHERE doctor_id=?");
+    $del->execute([$userId]);
+
+    $ins = db()->prepare("
+      INSERT INTO working_hours 
+        (doctor_id, day_of_week, start_time, end_time, is_available) 
+      VALUES (?,?,?,?,?)
+    ");
+    foreach ($hours as $row) {
+      $dow = isset($row['day_of_week']) ? (int)$row['day_of_week'] : null; // 0–6
+      $start = $row['start_time'] ?? null;
+      $end   = $row['end_time'] ?? null;
+      $avail = isset($row['is_available']) ? (int)$row['is_available'] : 0;
+
+      if ($dow === null || $dow < 0 || $dow > 6) continue;
+      if ($avail) {
+        if (!$start || !$end) {
+          $start = '09:00';
+          $end   = '18:00';
+        }
+      } else {
+        $start = $start ?: '09:00';
+        $end   = $end   ?: '18:00';
+      }
+      $ins->execute([$userId, $dow, $start, $end, $avail ? 1 : 0]);
+    }
+
+    json_exit(['ok'=>true,'msg'=>'Ажиллах цаг шинэчлэгдлээ.']);
   } catch (Exception $e) {
-    json_exit(['ok'=>false, 'msg'=>$e->getMessage()], 500);
+    json_exit(['ok'=>false,'msg'=>$e->getMessage()],500);
   }
 }
 
@@ -357,7 +188,6 @@ if ($action === 'doctors' && $_SERVER['REQUEST_METHOD']==='GET') {
 if ($action === 'bookings' && $_SERVER['REQUEST_METHOD']==='GET') {
   try {
     $clinic = $_GET['clinic'] ?? 'venera';
-    $hasClinicCol = has_booking_clinic_column();
     // Enforce clinic restriction for doctor role
     try {
       $cu = current_user();
@@ -370,8 +200,8 @@ if ($action === 'bookings' && $_SERVER['REQUEST_METHOD']==='GET') {
     }
     $date   = $_GET['date']   ?? date('Y-m-d');
     
-    // If clinic is 'all' or clinic column is missing, fetch across all clinics
-    if ($clinic === 'all' || !$hasClinicCol) {
+    // If clinic is 'all', fetch from all clinics. Otherwise, filter by clinic
+    if ($clinic === 'all') {
       $st = db()->prepare("SELECT b.*, d.name AS doctor_name, COALESCE(NULLIF(d.color,''),'#0d6efd') AS doctor_color, d.department FROM bookings b LEFT JOIN doctors d ON d.id=b.doctor_id WHERE b.date=? ORDER BY b.start_time");
       $st->execute([$date]);
     } else {
@@ -458,7 +288,6 @@ if ($action === 'doctors') {
 if ($action === 'bookings_week' && $_SERVER['REQUEST_METHOD']==='GET') {
   try {
     $clinic = $_GET['clinic'] ?? 'venera';
-    $hasClinicCol = has_booking_clinic_column();
     // Enforce doctor-specific clinic restriction
     try {
       $cu = current_user();
@@ -472,8 +301,8 @@ if ($action === 'bookings_week' && $_SERVER['REQUEST_METHOD']==='GET') {
     $start  = $_GET['start']  ?? date('Y-m-d');
     $end    = $_GET['end']    ?? date('Y-m-d');
     
-    // If clinic is 'all' or clinic column is missing, fetch from all clinics. Otherwise, filter by clinic
-    if ($clinic === 'all' || !$hasClinicCol) {
+    // If clinic is 'all', fetch from all clinics. Otherwise, filter by clinic
+    if ($clinic === 'all') {
       $st = db()->prepare("SELECT b.*, d.name AS doctor_name, COALESCE(NULLIF(d.color,''),'#0d6efd') AS doctor_color, d.department FROM bookings b LEFT JOIN doctors d ON d.id=b.doctor_id WHERE b.date BETWEEN ? AND ? ORDER BY b.date, b.start_time");
       $st->execute([$start, $end]);
     } else {
@@ -492,7 +321,6 @@ if ($action === 'bookings_week' && $_SERVER['REQUEST_METHOD']==='GET') {
 if ($action === 'bookings_month' && $_SERVER['REQUEST_METHOD']==='GET') {
   try {
     $clinic = $_GET['clinic'] ?? 'venera';
-    $hasClinicCol = has_booking_clinic_column();
     // Enforce doctor-specific clinic restriction
     try {
       $cu = current_user();
@@ -505,10 +333,10 @@ if ($action === 'bookings_month' && $_SERVER['REQUEST_METHOD']==='GET') {
     }
     $month  = $_GET['month']  ?? date('Y-m');
     
-    // If clinic is 'all' or clinic column is missing, fetch from all clinics. Otherwise, filter by clinic
+    // If clinic is 'all', fetch from all clinics. Otherwise, filter by clinic
     $cu = current_user();
     $role = $cu['role'] ?? '';
-    if ($clinic === 'all' || !$hasClinicCol) {
+    if ($clinic === 'all') {
       $st = db()->prepare("SELECT b.*, d.name AS doctor_name, COALESCE(NULLIF(d.color,''),'#0d6efd') AS doctor_color, d.department FROM bookings b LEFT JOIN doctors d ON d.id=b.doctor_id WHERE TO_CHAR(b.date, 'YYYY-MM')=? ORDER BY b.date, b.start_time");
       $st->execute([$month]);
     } else {
@@ -543,77 +371,15 @@ if ($action === 'create' && $_SERVER['REQUEST_METHOD']==='POST') {
     $treatment_id = (int)($in['treatment_id'] ?? 0);   // 🦷 Treatment ID
     $session_number = (int)($in['session_number'] ?? 1); // 🦷 Session number
 
-    if ($clinic === '') {
-      json_exit(['ok'=>false, 'msg'=>'Clinic ID шаардлагатай.'], 422);
-    }
-
-    // Require either a treatment_id or a free-text service name
-    if (!$clinic || !$date || !$start || $patient === '' || (!$treatment_id && $service_name === '')) {
+    if (!$clinic || !$date || !$start || !$end || $patient === '' || !$treatment_id) {
       json_exit(['ok'=>false, 'msg'=>'Талбар дутуу байна.'], 422);
     }
-
-    // Load clinic info once for downstream use (SMS + auditing)
-    $clinicInfo = load_clinic_info($clinic);
     
-    // Get service_name, price and duration from treatment
-    $price = 0;
-    $duration_minutes = 30; // default
-    if ($treatment_id > 0) {
-      $stTreat = db()->prepare("SELECT name, price, duration_minutes FROM treatments WHERE id = ?");
-      $stTreat->execute([$treatment_id]);
-      $treatData = $stTreat->fetch(PDO::FETCH_ASSOC);
-      if ($treatData) {
-        if (empty($service_name)) {
-          $service_name = $treatData['name'] ?? '';
-        }
-        $price = (float)($treatData['price'] ?? 0);
-        $duration_minutes = (int)($treatData['duration_minutes'] ?? 30);
-      }
-    } elseif ($service_name !== '') {
-      // Auto-create treatment if user typed a new service name (so it appears in treatments list)
-      try {
-        $hasClinicCol = has_treatment_clinic_column();
-        $findSql = "SELECT id FROM treatments WHERE name = ?" . ($hasClinicCol ? " AND (clinic = ? OR clinic IS NULL OR clinic = '')" : '');
-        $findParams = $hasClinicCol ? [$service_name, $clinic] : [$service_name];
-        $chk = db()->prepare($findSql);
-        $chk->execute($findParams);
-        $existingId = (int)$chk->fetchColumn();
-        if ($existingId > 0) {
-          $treatment_id = $existingId;
-        } else {
-          // Insert minimal treatment record
-          $cols = ['name','category','price','duration_minutes','sessions','interval_days','next_visit_mode','aftercare_days','aftercare_message'];
-          $placeholders = array_fill(0, count($cols), '?');
-          $params = [$service_name, '', 0, 30, 1, 0, 'auto', 0, ''];
-          if ($hasClinicCol) {
-            $cols[] = 'clinic';
-            $placeholders[] = '?';
-            $params[] = $clinic;
-          }
-          $insSql = 'INSERT INTO treatments (' . implode(',', $cols) . ') VALUES (' . implode(',', $placeholders) . ')';
-          $ins = db()->prepare($insSql);
-          $ins->execute($params);
-          $treatment_id = (int)db()->lastInsertId();
-        }
-      } catch (Exception $e) {
-        // ignore auto-create errors; booking will still save
-      }
-    }
-    
-    // Auto-calculate end_time based on treatment duration if not provided
-    $startTime = $start ? strtotime($date . ' ' . $start) : false;
-    if (empty($end) && $startTime) {
-      $endTime = $startTime + ($duration_minutes * 60);
-      $end = date('H:i:s', $endTime);
-    }
-    
-    if (empty($end)) {
-      json_exit(['ok'=>false, 'msg'=>'Дуусах цаг тодорхойлогдохгүй байна.'], 422);
-    }
-
-    // Past time guard — do not allow creating bookings in the past
-    if ($startTime && $startTime < time()) {
-      json_exit(['ok'=>false, 'msg'=>'Өнгөрсөн цагт захиалга үүсгэх боломжгүй.'], 422);
+    // Get service_name from treatment if not provided
+    if (empty($service_name) && $treatment_id > 0) {
+      $stTreatName = db()->prepare("SELECT name FROM treatments WHERE id = ?");
+      $stTreatName->execute([$treatment_id]);
+      $service_name = $stTreatName->fetchColumn() ?: '';
     }
 
     // === ЭМЧИЙН АЖИЛЛАХ ЦАГ ШАЛГАХ ===
@@ -681,53 +447,19 @@ if ($action === 'create' && $_SERVER['REQUEST_METHOD']==='POST') {
       }
     }
 
-    $hasClinicId = has_booking_clinic_id_column();
-    $insertSql = $hasClinicId
-      ? "INSERT INTO bookings (doctor_id, clinic, clinic_id, date, start_time, end_time, patient_name, gender, visit_count, phone, note, service_name, status, department, treatment_id, session_number, price, created_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,NOW())"
-      : "INSERT INTO bookings (doctor_id, clinic, date, start_time, end_time, patient_name, gender, visit_count, phone, note, service_name, status, department, treatment_id, session_number, price, created_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,NOW())";
-
-    $insertParams = $hasClinicId
-      ? [
-          $doctor_id > 0 ? $doctor_id : null,
-          $clinic,
-          $clinic,
-          $date,
-          $start,
-          $end,
-          $patient,
-          $gender,
-          $visit_count,
-          $phone,
-          $note,
-          $service_name,
-          $status,
-          $bookingDept,
-          $treatment_id > 0 ? $treatment_id : null,
-          $session_number,
-          $price
-        ]
-      : [
-          $doctor_id > 0 ? $doctor_id : null,
-          $clinic,
-          $date,
-          $start,
-          $end,
-          $patient,
-          $gender,
-          $visit_count,
-          $phone,
-          $note,
-          $service_name,
-          $status,
-          $bookingDept,
-          $treatment_id > 0 ? $treatment_id : null,
-          $session_number,
-          $price
-        ];
-
+    $ins = db()->prepare("
+      INSERT INTO bookings
+        (doctor_id, clinic, date, start_time, end_time,
+         patient_name, gender, visit_count, phone, note, service_name, status, department, treatment_id, session_number, created_at)
+      VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,NOW())
+    ");
+    
     try {
-      $ins = db()->prepare($insertSql);
-      $ins->execute($insertParams);
+      $ins->execute([
+        $doctor_id > 0 ? $doctor_id : null, $clinic, $date, $start, $end,
+        $patient, $gender, $visit_count, $phone, $note, $service_name, $status, $bookingDept,
+        $treatment_id > 0 ? $treatment_id : null, $session_number
+      ]);
     } catch (PDOException $dbEx) {
       error_log("❌ Booking INSERT failed: " . $dbEx->getMessage());
       json_exit(['ok'=>false, 'msg'=>'Booking үүсгэхэд алдаа: ' . $dbEx->getMessage()], 500);
@@ -750,7 +482,6 @@ if ($action === 'create' && $_SERVER['REQUEST_METHOD']==='POST') {
       } catch (Exception $e) {
         $clinicName = $clinic;
       }
-      $clinicNameLatin = to_latin($clinicName) ?: $clinic;
       if ($doctor_id) {
         try {
           $stDocNm = db()->prepare("SELECT name FROM doctors WHERE id=?");
@@ -760,120 +491,36 @@ if ($action === 'create' && $_SERVER['REQUEST_METHOD']==='POST') {
           $doctorName = '';
         }
       }
-      // Load templates & clinic contact info
-      $settingsPathLocal = __DIR__ . '/../db/settings.json';
-      $savedSettings = [];
-      if (file_exists($settingsPathLocal)) {
-        $s = @file_get_contents($settingsPathLocal);
-        $savedSettings = json_decode($s, true) ?: [];
+      // SMS message in Latin (works on all operators)
+      $msg = "Sain baina uu, tany zahialga amjilttai burtgegdlee.";
+      if ($clinicName) {
+        $msg .= " Emnelеg: {$clinicName}.";
       }
-
-      // Fetch clinic contact/map if available
-      $clinicPhone = '';
-      $clinicPhoneAlt = '';
-      $clinicAddress = '';
-      $clinicMap = '';
-      try {
-        $stClin2 = db()->prepare("SELECT phone, phone_alt, address, map_link FROM clinics WHERE code=?");
-        $stClin2->execute([$clinic]);
-        $cinfo = $stClin2->fetch(PDO::FETCH_ASSOC);
-        if ($cinfo) {
-          $clinicPhone = trim($cinfo['phone'] ?? '');
-          $clinicPhoneAlt = trim($cinfo['phone_alt'] ?? '');
-          $clinicAddress = trim($cinfo['address'] ?? '');
-          $clinicMap = trim($cinfo['map_link'] ?? '');
-        }
-      } catch (Exception $e) { }
-
-      $clinicDefaults = get_clinic_metadata($clinic);
-      if (!$clinicPhone) $clinicPhone = $clinicDefaults['phone1'] ?? '';
-      if (!$clinicPhoneAlt) $clinicPhoneAlt = $clinicDefaults['phone2'] ?? '';
-      if (!$clinicAddress) $clinicAddress = $clinicDefaults['address'] ?? '';
-      if (!$clinicMap) $clinicMap = $clinicDefaults['map'] ?? '';
-
-
-      $clinicContacts = $clinicPhone;
-      if ($clinicPhoneAlt) $clinicContacts .= ($clinicContacts ? ' / ' : '') . $clinicPhoneAlt;
-
-      $tplConfirm = trim($savedSettings['sms_confirmation_template'] ?? '');
-      $tplReminder = trim($savedSettings['sms_reminder_template'] ?? '');
-      $tplAftercare = trim($savedSettings['sms_aftercare_template'] ?? '');
-
-      $repl = [
-        '{patient}' => $patient,
-        '{date}' => $date,
-        '{start}' => $start,
-        '{clinic}' => $clinicNameLatin,
-        '{clinic_name}' => $clinicNameLatin,
-        '{clinic_contacts}' => $clinicContacts,
-        '{clinic_map}' => $clinicMap,
-        '{clinic_address}' => $clinicAddress,
-        '{phone1}' => $clinicPhone,
-        '{phone2}' => $clinicPhoneAlt,
-        '{treatment}' => $service_name,
-        '{doctor}' => $doctorName,
-        '{phone}' => $phone
-      ];
-
-      if ($tplConfirm !== '') {
-        $msg = strtr($tplConfirm, $repl);
-      } else {
-        // Fallback message
-        $msg = "Sain baina uu, {$patient}! ";
-        $msg .= "Tany tsag amjilttai burtgegdlee. ";
-        $msg .= "Ognoo: {$date}, Tsag: {$start}";
-        if ($doctorName) {
-          $msg .= ", Emch: {$doctorName}";
-        }
-        $msg .= ". Bid tand tuslahad bayartai baina! {$clinicNameLatin}";
+      if ($doctorName) {
+        $msg .= " Emch: {$doctorName}.";
       }
+      $msg .= " Ognoo: {$date}, tsag: {$start}-{$end}.";
       // Send SMS (if configured) – errors are ignored so booking still succeeds
       try {
         sendSMS($phone, $msg, $newId);
         
-        // Schedule reminder SMS relative to appointment time (defaults to 2 hours before)
-        $reminderHours = (int)($savedSettings['sms_reminder_hours'] ?? 2);
-        if ($reminderHours <= 0) $reminderHours = 2;
-        $startDateTime = strtotime($date . ' ' . ($start ?: '09:00'));
-        $reminderTs = $startDateTime ? ($startDateTime - ($reminderHours * 3600)) : strtotime($date . ' -1 day 10:00:00');
-        // If the reminder time has already passed but the appointment is still upcoming today, send ASAP (in 1 minute)
-        if ($startDateTime && $startDateTime > time() && $reminderTs <= time()) {
-          $reminderTs = time() + 60;
-        }
-        if ($reminderTs && $reminderTs > time()) {
-          if ($tplReminder !== '') {
-            $reminderMsg = strtr($tplReminder, $repl);
-          } else {
-            $reminderMsg = "Sain baina uu, {$patient}! Tanii tsag {$reminderHours} tsagiin daraa ({$date} {$start}) ehelne. " .
-                          "Tsagaa solih bol holбогдоно уу. Bayarlalaa!";
-          }
-          $reminderDate = date('Y-m-d H:i:s', $reminderTs);
+        // Schedule reminder SMS for day before appointment
+        $reminderDate = date('Y-m-d 10:00:00', strtotime($date . ' -1 day'));
+        if (strtotime($reminderDate) > time()) {
+          $reminderMsg = "Sain baina uu! Margaash {$date} ognoo {$start} tsagt {$clinicName} emnelegd tsag avsan baina. Hutsleh bol 70001234 ruu zalgarai.";
           $stSched = db()->prepare("INSERT INTO sms_schedule (booking_id, phone, message, scheduled_at, type) VALUES (?, ?, ?, ?, 'reminder')");
           $stSched->execute([$newId, $phone, $reminderMsg, $reminderDate]);
         }
         
-        // Schedule aftercare SMS if treatment has aftercare - Эелдэг aftercare мессеж
+        // Schedule aftercare SMS if treatment has aftercare
         if (!empty($treatment_id)) {
-          $stTreat2 = db()->prepare("SELECT aftercare_days, aftercare_message, name FROM treatments WHERE id = ? AND aftercare_days > 0");
-          $stTreat2->execute([$treatment_id]);
-          $treatmentInfo = $stTreat2->fetch();
-          if ($treatmentInfo && $treatmentInfo['aftercare_days'] > 0) {
-            $aftercareDate = date('Y-m-d 10:00:00', strtotime($date . ' +' . $treatmentInfo['aftercare_days'] . ' days'));
-            // Эелдэг aftercare мессеж
-            // Prefer template for aftercare if present, else treatment-specific message, else fallback
-            if ($tplAftercare !== '') {
-              $aftercareMsg = strtr($tplAftercare, $repl);
-            } else {
-              $aftercareMsg = $treatmentInfo['aftercare_message'];
-              if (empty($aftercareMsg)) {
-                $aftercareMsg = "Sain baina uu, {$patient}! {$clinicName} emnelegees mendiilj baina. ";
-                $aftercareMsg .= "Tany emchilgeenii daraa baydalaa shalgah tsag bolloo. ";
-                $aftercareMsg .= "Yamarnegen asuult, zowolgoo awah bol 80806780 ruu holbogdono uu. ";
-                $aftercareMsg .= "Tany eruul mendiin toloo bid ur buteeltei ajillaj baina. Bayarlalaa!";
-              }
-            }
+          $stTreat = db()->prepare("SELECT aftercare_days, aftercare_message FROM treatments WHERE id = ? AND aftercare_days > 0");
+          $stTreat->execute([$treatment_id]);
+          $treatment = $stTreat->fetch();
+          if ($treatment && $treatment['aftercare_message']) {
+            $aftercareDate = date('Y-m-d 10:00:00', strtotime($date . ' +' . $treatment['aftercare_days'] . ' days'));
             $stSched = db()->prepare("INSERT INTO sms_schedule (booking_id, phone, message, scheduled_at, type) VALUES (?, ?, ?, ?, 'aftercare')");
-            $stSched->execute([$newId, $phone, $aftercareMsg, $aftercareDate]);
+            $stSched->execute([$newId, $phone, $treatment['aftercare_message'], $aftercareDate]);
           }
         }
       } catch (Exception $smsEx) {
@@ -914,17 +561,8 @@ if ($action === 'update' && $_SERVER['REQUEST_METHOD']==='POST') {
     $service_name = trim($in['service_name'] ?? $old['service_name']);
     $status      = $in['status']       ?? $old['status'];
 
-    if (trim($clinic) === '') {
-      json_exit(['ok'=>false,'msg'=>'Clinic ID шаардлагатай.'],422);
-    }
-
     if ($service_name === '') {
       json_exit(['ok'=>false,'msg'=>'Үйлчилгээний нэр шаардлагатай.'],422);
-    }
-
-    $startTime = $start && $date ? strtotime($date . ' ' . $start) : false;
-    if ($startTime && $startTime < time()) {
-      json_exit(['ok'=>false, 'msg'=>'Өнгөрсөн цагт захиалга хадгалахгүй.'], 422);
     }
 
     // === ЭМЧИЙН АЖИЛЛАХ ЦАГ ШАЛГАХ (UPDATE) ===
@@ -990,32 +628,17 @@ if ($action === 'update' && $_SERVER['REQUEST_METHOD']==='POST') {
       }
     }
 
-    $hasClinicId = has_booking_clinic_id_column();
-    if ($hasClinicId) {
-      $u = db()->prepare("
-        UPDATE bookings SET
-          doctor_id=?, clinic=?, clinic_id=?, date=?, start_time=?, end_time=?,
-          patient_name=?, gender=?, visit_count=?, phone=?, note=?, service_name=?, status=?, department=?
-        WHERE id=?
-      ");
-      $u->execute([
-        $doctor_id, $clinic, $clinic, $date, $start, $end,
-        $patient, $gender, $visit_count, $phone, $note, $service_name, $status, $bookingDept,
-        $id
-      ]);
-    } else {
-      $u = db()->prepare("
-        UPDATE bookings SET
-          doctor_id=?, clinic=?, date=?, start_time=?, end_time=?,
-          patient_name=?, gender=?, visit_count=?, phone=?, note=?, service_name=?, status=?, department=?
-        WHERE id=?
-      ");
-      $u->execute([
-        $doctor_id, $clinic, $date, $start, $end,
-        $patient, $gender, $visit_count, $phone, $note, $service_name, $status, $bookingDept,
-        $id
-      ]);
-    }
+    $u = db()->prepare("
+      UPDATE bookings SET
+        doctor_id=?, clinic=?, date=?, start_time=?, end_time=?,
+        patient_name=?, gender=?, visit_count=?, phone=?, note=?, service_name=?, status=?, department=?
+      WHERE id=?
+    ");
+    $u->execute([
+      $doctor_id, $clinic, $date, $start, $end,
+      $patient, $gender, $visit_count, $phone, $note, $service_name, $status, $bookingDept,
+      $id
+    ]);
 
     json_exit(['ok'=>true,'msg'=>'Шинэчлэгдлээ.']);
   } catch (Exception $e) {
@@ -1253,37 +876,21 @@ if ($action === 'add_treatment' && $_SERVER['REQUEST_METHOD']==='POST') {
     $name = trim($in['name'] ?? '');
     $category = trim($in['category'] ?? '');
     $price = (float)($in['price'] ?? 0);
-    $duration_minutes = (int)($in['duration_minutes'] ?? 30);
     $sessions = (int)($in['sessions'] ?? 1);
     $interval_days = (int)($in['interval_days'] ?? 0);
     $next_visit_mode = in_array($in['next_visit_mode'] ?? '', ['auto', 'manual']) ? $in['next_visit_mode'] : 'auto';
     $aftercare_days = (int)($in['aftercare_days'] ?? 0);
     $aftercare_message = trim($in['aftercare_message'] ?? '');
-    $clinic = trim($in['clinic'] ?? '') ?: null;
-    $price_editable = isset($in['price_editable']) ? (int)$in['price_editable'] : 0;
-    $hasClinicCol = has_treatment_clinic_column();
-    $hasPriceEditable = has_treatment_price_editable_column();
     
     if (!$name) {
       json_exit(['ok'=>false, 'msg'=>'Эмчилгээний нэр оруулна уу'], 422);
     }
-    // Build insert dynamically to tolerate missing columns
-    $cols = ['name','category','price','duration_minutes','sessions','interval_days','next_visit_mode','aftercare_days','aftercare_message'];
-    $placeholders = array_fill(0, count($cols), '?');
-    $params = [$name, $category, $price, $duration_minutes, $sessions, $interval_days, $next_visit_mode, $aftercare_days, $aftercare_message];
-    if ($hasClinicCol) {
-      $cols[] = 'clinic';
-      $placeholders[] = '?';
-      $params[] = $clinic;
-    }
-    if ($hasPriceEditable) {
-      $cols[] = 'price_editable';
-      $placeholders[] = '?';
-      $params[] = $price_editable;
-    }
-    $sql = 'INSERT INTO treatments (' . implode(',', $cols) . ') VALUES (' . implode(',', $placeholders) . ')';
-    $ins = db()->prepare($sql);
-    $ins->execute($params);
+    
+    $ins = db()->prepare("
+      INSERT INTO treatments (name, category, price, sessions, interval_days, next_visit_mode, aftercare_days, aftercare_message)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+    ");
+    $ins->execute([$name, $category, $price, $sessions, $interval_days, $next_visit_mode, $aftercare_days, $aftercare_message]);
     
     json_exit(['ok'=>true, 'msg'=>'Эмчилгээ нэмэгдлээ', 'id'=>db()->lastInsertId()]);
   } catch (Exception $e) {
@@ -1303,7 +910,6 @@ if ($action === 'update_treatment' && $_SERVER['REQUEST_METHOD']==='POST') {
     $name = trim($in['name'] ?? '');
     $category = trim($in['category'] ?? '');
     $price = (float)($in['price'] ?? 0);
-    $duration_minutes = (int)($in['duration_minutes'] ?? 30);
     $sessions = (int)($in['sessions'] ?? 1);
     $interval_days = (int)($in['interval_days'] ?? 0);
     $next_visit_mode = in_array($in['next_visit_mode'] ?? '', ['auto', 'manual']) ? $in['next_visit_mode'] : 'auto';
@@ -1316,11 +922,11 @@ if ($action === 'update_treatment' && $_SERVER['REQUEST_METHOD']==='POST') {
     
     $upd = db()->prepare("
       UPDATE treatments SET 
-        name = ?, category = ?, price = ?, duration_minutes = ?, sessions = ?, interval_days = ?, 
-        next_visit_mode = ?, aftercare_days = ?, aftercare_message = ?, clinic = ?, price_editable = ?
+        name = ?, category = ?, price = ?, sessions = ?, interval_days = ?, 
+        next_visit_mode = ?, aftercare_days = ?, aftercare_message = ?
       WHERE id = ?
     ");
-    $upd->execute([$name, $category, $price, $duration_minutes, $sessions, $interval_days, $next_visit_mode, $aftercare_days, $aftercare_message, $clinic, $price_editable, $id]);
+    $upd->execute([$name, $category, $price, $sessions, $interval_days, $next_visit_mode, $aftercare_days, $aftercare_message, $id]);
     
     json_exit(['ok'=>true, 'msg'=>'Эмчилгээ шинэчлэгдлээ']);
   } catch (Exception $e) {
@@ -1329,11 +935,11 @@ if ($action === 'update_treatment' && $_SERVER['REQUEST_METHOD']==='POST') {
 }
 
 /* =========================
-  DELETE TREATMENT (Admin & Reception)
-  ========================= */
+   DELETE TREATMENT (Admin only)
+   ========================= */
 if ($action === 'delete_treatment' && $_SERVER['REQUEST_METHOD']==='POST') {
   try {
-    require_role(['admin', 'reception']);
+    require_role(['admin']);
     $in = json_decode(file_get_contents('php://input'), true) ?: [];
     $id = (int)($in['id'] ?? 0);
     
@@ -1354,31 +960,6 @@ if ($action === 'delete_treatment' && $_SERVER['REQUEST_METHOD']==='POST') {
     json_exit(['ok'=>true, 'msg'=>'Эмчилгээ устгагдлаа']);
   } catch (Exception $e) {
     json_exit(['ok'=>false, 'msg'=>$e->getMessage()], 500);
-  }
-}
-
-/* =========================
-   ADD SMS SCHEDULE
-   ========================= */
-if ($action === 'add_sms' && $_SERVER['REQUEST_METHOD']==='POST') {
-  try {
-    require_role(['admin','reception']);
-    $in = json_decode(file_get_contents('php://input'), true) ?: [];
-    $booking_id = isset($in['booking_id']) ? (int)$in['booking_id'] : null;
-    $phone = trim($in['phone'] ?? '');
-    $message = trim($in['message'] ?? '');
-    $scheduled_at = trim($in['scheduled_at'] ?? '');
-
-    if (!$phone || !$message || !$scheduled_at) {
-      json_exit(['ok'=>false,'msg'=>'Бүх талбарыг бөглөнө үү'],422);
-    }
-
-    $ins = db()->prepare("INSERT INTO sms_schedule (booking_id, phone, message, scheduled_at, type, status, created_at) VALUES (?, ?, ?, ?, 'manual', 'pending', NOW())");
-    $ins->execute([$booking_id, $phone, $message, $scheduled_at]);
-
-    json_exit(['ok'=>true,'msg'=>'SMS төлөвлөсөн','id'=>db()->lastInsertId()]);
-  } catch (Exception $e) {
-    json_exit(['ok'=>false,'msg'=>$e->getMessage()],500);
   }
 }
 
@@ -1433,47 +1014,6 @@ if ($action === 'delete_sms' && $_SERVER['REQUEST_METHOD']==='POST') {
     } else {
       json_exit(['ok'=>false, 'msg'=>'Устгах боломжгүй (илгээсэн эсвэл олдсонгүй)'], 422);
     }
-  } catch (Exception $e) {
-    json_exit(['ok'=>false, 'msg'=>$e->getMessage()], 500);
-  }
-}
-
-/* =========================
-   SAVE SMS TEMPLATE (settings.json)
-   ========================= */
-if ($action === 'save_sms_template' && $_SERVER['REQUEST_METHOD']==='POST') {
-  try {
-    require_role(['admin', 'reception']);
-    $in = json_decode(file_get_contents('php://input'), true) ?: [];
-    $type = trim($in['type'] ?? ''); // confirmation|reminder|aftercare
-    $text = trim($in['text'] ?? '');
-    $allowed = [
-      'confirmation' => 'sms_confirmation_template',
-      'reminder' => 'sms_reminder_template',
-      'aftercare' => 'sms_aftercare_template'
-    ];
-    if (!isset($allowed[$type])) {
-      json_exit(['ok'=>false, 'msg'=>'Template type буруу'], 422);
-    }
-    if ($text === '') {
-      json_exit(['ok'=>false, 'msg'=>'Message хоосон байна'], 422);
-    }
-
-    $settingsPath = __DIR__ . '/../db/settings.json';
-    $data = [];
-    if (file_exists($settingsPath)) {
-      $data = json_decode(@file_get_contents($settingsPath), true);
-      if (!is_array($data)) $data = [];
-    }
-    $data[$allowed[$type]] = $text;
-
-    // Pretty-print JSON for readability
-    $saved = @file_put_contents($settingsPath, json_encode($data, JSON_UNESCAPED_UNICODE | JSON_PRETTY_PRINT));
-    if ($saved === false) {
-      json_exit(['ok'=>false, 'msg'=>'settings.json хадгалах үед алдаа гарлаа'], 500);
-    }
-
-    json_exit(['ok'=>true, 'msg'=>'Загвар хадгалагдлаа']);
   } catch (Exception $e) {
     json_exit(['ok'=>false, 'msg'=>$e->getMessage()], 500);
   }

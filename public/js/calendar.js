@@ -58,7 +58,7 @@ function applyCssVars() {
 
 async function loadTreatments() {
   try {
-    const url = `${API}?action=treatments&_=${Date.now()}`;
+    const url = `${API}?action=treatments&clinic=${encodeURIComponent(CURRENT_CLINIC)}&_=${Date.now()}`;
     const r = await fetchJSON(url);
     if (!r?.ok) {
       console.error('Treatments API Error:', r?.msg || 'Unknown error');
@@ -127,8 +127,9 @@ function initTreatmentSearch() {
       }
       grouped[cat].forEach(t => {
         const price = t.price > 0 ? `<span class="treatment-price">${Number(t.price).toLocaleString()}₮</span>` : '';
-        html += `<div class="treatment-option" data-id="${t.id}" data-name="${esc(t.name)}" data-price="${t.price || 0}">
-          <span class="treatment-name">${esc(t.name)} <small>(${t.sessions} удаа)</small></span>
+        const duration = t.duration_minutes || 30;
+        html += `<div class="treatment-option" data-id="${t.id}" data-name="${esc(t.name)}" data-price="${t.price || 0}" data-duration="${duration}">
+          <span class="treatment-name">${esc(t.name)} <small>(${duration} мин)</small></span>
           ${price}
         </div>`;
       });
@@ -171,6 +172,21 @@ function initTreatmentSearch() {
       searchInput.value = opt.dataset.name;
       hiddenId.value = opt.dataset.id;
       hiddenCustom.value = '';
+      
+      // Auto-calculate end_time based on treatment duration
+      const duration = parseInt(opt.dataset.duration) || 30;
+      const startTimeInput = q('#addForm input[name="start_time"]');
+      const endTimeInput = q('#addForm input[name="end_time"]');
+      
+      if (startTimeInput && startTimeInput.value && endTimeInput) {
+        const startTime = startTimeInput.value;
+        const [hours, minutes] = startTime.split(':').map(Number);
+        const startMinutes = hours * 60 + minutes;
+        const endMinutes = startMinutes + duration;
+        const endHours = Math.floor(endMinutes / 60);
+        const endMins = endMinutes % 60;
+        endTimeInput.value = `${String(endHours).padStart(2, '0')}:${String(endMins).padStart(2, '0')}`;
+      }
     }
     
     dropdown.classList.remove('show');
@@ -208,6 +224,30 @@ function initTreatmentSearch() {
       dropdown.classList.remove('show');
     }
   });
+  
+  // Auto-calculate end_time when start_time changes
+  const startTimeInput = q('#addForm input[name="start_time"]');
+  if (startTimeInput) {
+    startTimeInput.addEventListener('change', () => {
+      const selectedTreatmentId = hiddenId.value;
+      if (selectedTreatmentId) {
+        const treatment = TREATMENTS.find(t => t.id == selectedTreatmentId);
+        if (treatment) {
+          const duration = treatment.duration_minutes || 30;
+          const startTime = startTimeInput.value;
+          const [hours, minutes] = startTime.split(':').map(Number);
+          const startMinutes = hours * 60 + minutes;
+          const endMinutes = startMinutes + duration;
+          const endHours = Math.floor(endMinutes / 60);
+          const endMins = endMinutes % 60;
+          const endTimeInput = q('#addForm input[name="end_time"]');
+          if (endTimeInput) {
+            endTimeInput.value = `${String(endHours).padStart(2, '0')}:${String(endMins).padStart(2, '0')}`;
+          }
+        }
+      }
+    });
+  }
 }
 
 async function loadDoctors() {
@@ -356,8 +396,8 @@ function renderDayView(date, events) {
       const mm = Math.floor((mins % 60) / 15) * 15;
       if (hh < WORK_START || hh >= WORK_END) return;
       const start = `${String(hh).padStart(2, '0')}:${String(mm).padStart(2, '0')}`;
-      const endH = hh + Math.floor((mm + 30) / 60);
-      const endM = (mm + 30) % 60;
+      const endH = hh + Math.floor((mm + 60) / 60);
+      const endM = (mm + 60) % 60;
       const end = `${String(endH).padStart(2, '0')}:${String(endM).padStart(2, '0')}`;
       const f = q('#addForm');
       if (!f) return;
@@ -833,7 +873,7 @@ document.addEventListener('DOMContentLoaded', async () => {
     loadBookings();
   });
   q('#today')?.addEventListener('click', () => { CURRENT_DATE = new Date(); loadBookings(); });
-  clinicSel?.addEventListener('change', async e => { CURRENT_CLINIC = e.target.value; await loadDoctors(); await loadBookings(); });
+  clinicSel?.addEventListener('change', async e => { CURRENT_CLINIC = e.target.value; await loadDoctors(); await loadTreatments(); await loadBookings(); });
   const updateViewButtons = mode => {
     document.querySelectorAll('#viewDay, #viewWeek, #viewMonth').forEach(btn => { btn.classList.remove('active'); btn.style.background = ''; btn.style.color = ''; });
     const activeBtn = mode === 'day' ? q('#viewDay') : mode === 'week' ? q('#viewWeek') : q('#viewMonth');

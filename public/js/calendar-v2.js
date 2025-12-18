@@ -12,6 +12,7 @@ const phoneLookupTimers = {};
 const WORK_START = 9;
 const WORK_END = 18;
 const PX_PER_HOUR = 80;
+let NOW_LINE_TIMER = null;
 
 const q = s => document.querySelector(s);
 const esc = s => (s ?? '').toString().replace(/[&<>"']/g, m => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[m]));
@@ -38,6 +39,49 @@ const isoMonday = d => {
   x.setHours(0, 0, 0, 0);
   return x;
 };
+
+const isToday = dateStr => dateStr === fmtDate(new Date());
+const nowOffsetPx = () => {
+  const now = new Date();
+  const mins = now.getHours() * 60 + now.getMinutes();
+  return (mins - WORK_START * 60) * (PX_PER_HOUR / 60);
+};
+function drawNowLine(el, dateStr) {
+  if (!el) return;
+  const existing = el.querySelector('.now-line');
+  if (!isToday(dateStr)) {
+    if (existing) existing.remove();
+    return;
+  }
+  const top = nowOffsetPx();
+  const maxH = (WORK_END - WORK_START + 1) * PX_PER_HOUR;
+  if (top < 0 || top > maxH) {
+    if (existing) existing.remove();
+    return;
+  }
+  const line = existing || document.createElement('div');
+  line.className = 'now-line';
+  line.style.position = 'absolute';
+  line.style.left = '0';
+  line.style.right = '0';
+  line.style.height = '2px';
+  line.style.background = 'linear-gradient(90deg, transparent 0%, #ef4444 15%, #ef4444 85%, transparent 100%)';
+  line.style.top = `${top}px`;
+  line.style.pointerEvents = 'none';
+  line.style.zIndex = '6';
+  line.style.boxShadow = '0 0 6px #ef4444';
+  if (!existing) el.appendChild(line);
+}
+function refreshNowLines() {
+  document.querySelectorAll('.calendar-hours').forEach(el => {
+    const dateStr = el.dataset.date;
+    drawNowLine(el, dateStr);
+  });
+}
+function ensureNowLineTimer() {
+  if (NOW_LINE_TIMER) return;
+  NOW_LINE_TIMER = setInterval(refreshNowLines, 60000);
+}
 
 const statusConfig = {
   online: { color: '#3b82f6', bg: 'linear-gradient(135deg, #0f172a 0%, #1e293b 100%)', textColor: '#60a5fa', name: 'Online', badge: '#1e40af' },
@@ -146,6 +190,7 @@ function renderDayView(date, events) {
     }
     col.innerHTML = `<div class="head" style="background: linear-gradient(135deg, #1e293b 0%, #0f172a 100%); border-bottom: 2px solid #334155;"><div style="font-weight: 700; margin-bottom: 0.5rem; color: #e2e8f0;"><i class="fas fa-user-md" style="color: ${docColor}; margin-right: 0.5rem;"></i>${esc(d.name)}</div><span class="badge" style="background: ${docColor}40; color: ${docColor}; border: 1px solid ${docColor}60; padding: 0.4rem 0.8rem; font-size: 0.75rem;">${workLabel}</span></div><div class="calendar-hours position-relative"><div class="calendar-grid"></div></div>`;
     const hoursEl = col.querySelector('.calendar-hours');
+    hoursEl.dataset.date = date;
     // Force consistent hours column height so grid lines align with time gutter
     hoursEl.style.height = `${(WORK_END - WORK_START + 1) * PX_PER_HOUR}px`;
     hoursEl.style.overflow = 'hidden';
@@ -209,6 +254,9 @@ function renderDayView(date, events) {
     });
     row.appendChild(col);
   });
+
+  refreshNowLines();
+  ensureNowLineTimer();
 
   // Align time gutter with the header height so 09:00 lines up under doctor name
   try {
@@ -295,6 +343,7 @@ function renderWeekView(startDate, endDate, events) {
     const headerColor = isToday ? '#60a5fa' : '#e2e8f0';
     col.innerHTML = `<div class="head text-center" style="background: ${headerBg}; border-bottom: 2px solid ${isToday ? '#3b82f6' : '#334155'};"><strong style="color: ${headerColor}; display: block; margin-bottom: 0.25rem;">${names[i]}</strong><small style="color: ${isToday ? '#93c5fd' : '#94a3b8'}; opacity: 0.8;">${ds}</small></div><div class="calendar-hours position-relative"><div class="calendar-grid"></div></div>`;
     const hoursEl = col.querySelector('.calendar-hours');
+    hoursEl.dataset.date = ds;
     // Force consistent hours column height so grid lines align with time gutter
     hoursEl.style.height = `${(WORK_END - WORK_START + 1) * PX_PER_HOUR}px`;
     hoursEl.style.overflow = 'hidden';
@@ -393,6 +442,9 @@ function renderWeekView(startDate, endDate, events) {
     });
     row.appendChild(col);
   }
+
+  refreshNowLines();
+  ensureNowLineTimer();
 
   // Align time gutter with the header height so 09:00 lines up under day headers
   try {

@@ -1,99 +1,74 @@
-# Venera-Dent Booking System - AI Coding Instructions
 
-## Architecture Overview
+# Venera-Dent Booking System — Copilot Instructions
 
-This is a PHP/MySQL dental clinic booking system with multi-clinic support. The app runs on WAMP (Windows Apache MySQL PHP) stack.
+## Architecture & Key Components
 
-### Directory Structure
-- `public/` - All user-facing pages (entry point: `index.php`)
-- `config.php` - Database connection, auth, helpers, SMS (Twilio) integration
-- `partials/` - Shared UI components (`sidebar.php`)
-- `db/` - SQL schema (`booking_app.sql`) and settings (`settings.json`)
-- `public/js/calendar.js` - Main calendar logic (day/week/month views)
+- **Stack:** PHP (vanilla, no framework), MySQL/PostgreSQL, runs on Apache (WAMP/LAMP/Docker).
+- **public/**: All user-facing endpoints (entry: public/index.php). Each major feature (bookings, doctors, clinics, etc.) has its own PHP file.
+- **config.php**: Central for DB connection, authentication, and SMS (Skytel) integration. Always use the `db()` singleton for queries.
+- **db/**: Contains schema (booking_app.sql), settings (settings.json), and SQL migrations.
+- **partials/**: Shared UI components (e.g., sidebar.php).
+- **public/js/calendar.js**: Main calendar logic (day/week/month views, status colors, doctor/clinic selection).
 
-### Key Data Entities
-- **Users** (`users`): roles are `admin`, `reception`, `doctor` - authenticated via phone + PIN
-- **Doctors** (`doctors`): linked to clinics, have `working_hours` per day_of_week (0=Sunday)
-- **Bookings** (`bookings`): patient appointments tied to doctor/clinic/date/time
-- **Clinics** (`clinics`): multiple locations (venera, luxor, khatan) with codes
+## Data Model & Roles
 
-## Critical Patterns
+- **Users**: Roles are `admin`, `reception`, `doctor`. Auth via phone + PIN. Role/clinic restrictions are enforced in code.
+- **Doctors**: Linked to clinics, have per-day working hours (see working_hours table).
+- **Bookings**: Appointments tied to doctor, clinic, date, and time.
+- **Clinics**: Multi-location support (e.g., venera, luxor, khatan).
 
-### Database Access
-Always use the `db()` singleton from `config.php`:
-```php
-$st = db()->prepare("SELECT * FROM bookings WHERE clinic=? AND date=?");
-$st->execute([$clinic, $date]);
-$rows = $st->fetchAll();
-```
+## API & Patterns
 
-### API Pattern
-`public/api.php` handles all AJAX calls. Actions are determined by `$_GET['action']`:
-- `doctors` - list doctors with working_hours
-- `bookings`, `bookings_week`, `bookings_month` - fetch appointments
-- `create`, `update`, `delete` - booking CRUD
-- `update_my_hours` - doctor self-service hours
+- **API Endpoint:** All AJAX/API handled by public/api.php. Action is determined by `$_GET['action']`.
+  - Example: `/api.php?action=bookings&date=YYYY-MM-DD&clinic=venera`
+  - Response: Always use `json_exit(['ok'=>true, 'data'=>$result])` or `['ok'=>false, 'msg'=>'error']`
+- **Adding API Actions:** Follow the try/catch pattern for new actions (see api.php for examples).
+- **Auth Guards:** Use `require_login()` and `require_role(['admin'])` for access control. Use `current_user()` for user context.
+- **Clinic Restriction:** Doctors/receptionists are always restricted to their own clinic in backend logic.
 
-Response format: `json_exit(['ok'=>true, 'data'=>$result])` or `['ok'=>false, 'msg'=>'error']`
+## Booking & Working Hours Logic
 
-### Auth & Role Guards
-```php
-require_login();           // Redirects to login.php if not authenticated
-require_role(['admin']);   // 403 if role mismatch
-$user = current_user();    // Returns ['id', 'name', 'role', 'clinic_id']
-```
-Doctors/receptionists are **restricted to their clinic** - the code overrides `$clinic` param for these roles.
+- **Validation:** Always check doctor working hours before creating bookings.
+  - Use: `SELECT start_time, end_time FROM working_hours WHERE doctor_id=? AND day_of_week=?`
+- **Doctor Creation:** Adding a doctor auto-creates a user and default working hours (Mon-Fri 09:00-18:00).
 
-### Working Hours Validation
-Before creating bookings, always validate against `working_hours`:
-```php
-$dow = (int)date('w', strtotime($date)); // PHP: 0=Sun, 6=Sat
-$stWh = db()->prepare("SELECT start_time, end_time, is_available FROM working_hours WHERE doctor_id=? AND day_of_week=?");
-```
+## SMS Integration
 
-### SMS Integration
-`sendSMS($phone, $message, $booking_id)` in `config.php`:
-- Uses Skytel WEB2SMS API (http://web2sms.skytel.mn)
-- Phone numbers should be 8-digit Mongolian numbers
-- Falls back to `sms_log` table for logging if `SMS_DISABLED=true` in `.env`
+- Use `sendSMS($phone, $message, $booking_id)` from config.php.
+- Skytel WEB2SMS API; logs to sms_log if SMS is disabled.
 
-## Settings Configuration
-`db/settings.json` stores app preferences (theme colors, default view, send_reminders). Load with:
-```php
-$settings = json_decode(file_get_contents(__DIR__.'/../db/settings.json'), true);
-```
+## Settings & Configuration
 
-## Frontend/Calendar
-`public/js/calendar.js` uses vanilla JS with these globals:
-- `DOCTORS` array populated via `loadDoctors()`
-- `CURRENT_CLINIC`, `VIEW_MODE` (day/week/month)
-- Status colors: online (blue), arrived (amber), paid (green), pending (purple), cancelled (red)
+- App preferences in db/settings.json (theme, reminders, etc.), loaded via `json_decode(file_get_contents(...))`.
 
-## Development Notes
+## Frontend Patterns
 
-### Local Setup
-1. Place in `C:\wamp64\www\booking\`
-2. Import `db/booking_app.sql` into MySQL (port 3307, database `hospital_db`)
-3. Access at `http://localhost/booking/public/`
+- **Calendar:** Vanilla JS, globals: `DOCTORS`, `CURRENT_CLINIC`, `VIEW_MODE`.
+- **Status Colors:** online (blue), arrived (amber), paid (green), pending (purple), cancelled (red).
 
-### Default Credentials
-- Admin: phone `99999999`, PIN `1234`
-- All seeded users use PIN hash for `1234`
+## Local Development
 
-### Adding New API Actions
-Add to `api.php` following existing pattern:
-```php
-if ($action === 'your_action' && $_SERVER['REQUEST_METHOD']==='POST') {
-  try {
-    // validate input, execute queries
-    json_exit(['ok'=>true, 'data'=>$result]);
-  } catch (Exception $e) {
-    json_exit(['ok'=>false, 'msg'=>$e->getMessage()], 500);
+- Place code in `C:\wamp64\www\booking\` (or `/opt/booking` for Docker).
+- Import db/booking_app.sql to MySQL/PostgreSQL.
+- Access via `http://localhost/booking/public/`
+- Default admin: phone `99999999`, PIN `1234`.
+
+## Examples
+
+- **DB Query:**
+  ```php
+  $st = db()->prepare("SELECT * FROM bookings WHERE clinic=? AND date=?");
+  $st->execute([$clinic, $date]);
+  $rows = $st->fetchAll();
+  ```
+- **API Action:**
+  ```php
+  if ($action === 'your_action' && $_SERVER['REQUEST_METHOD']==='POST') {
+    try {
+      // validate input, execute queries
+      json_exit(['ok'=>true, 'data'=>$result]);
+    } catch (Exception $e) {
+      json_exit(['ok'=>false, 'msg'=>$e->getMessage()], 500);
+    }
   }
-}
-```
-
-### Creating Doctor Records
-When adding doctors via `doctors.php`, the system auto-creates:
-1. User record with role='doctor'
-2. Default `working_hours` entries (Mon-Fri 09:00-18:00)
+  ```

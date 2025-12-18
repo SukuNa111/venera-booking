@@ -260,4 +260,45 @@ function formatPhoneNumber($phone) {
     
     return false;
 }
+
+// -----------------------
+// Clinic directory (fallback for contact / map data)
+// -----------------------
+$clinicDirectory = [
+    'venera' => [
+        'name'   => 'Venera',
+        'phone1' => '80806780',
+        'phone2' => '88001234',
+        'map'    => 'https://maps.app.goo.gl/venera-sample',
+        'address'=> 'Улаанбаатар хот, Сүхбаатар дүүрэг'
+    ],
+    'khatan' => [
+        'name'   => 'Goo Khatan',
+        'phone1' => '99303048',
+        'phone2' => '71007100',
+        'map'    => 'https://maps.app.goo.gl/khatan-sample',
+        'address'=> 'Хан-Уул дүүрэг, 3-р хороолол'
+    ],
+    'luxor' => [
+        'name'   => 'Golden Luxor',
+        'phone1' => '70337070',
+        'phone2' => '',
+        'map'    => 'https://maps.app.goo.gl/luxor-sample',
+        'address'=> 'Баянзүрх дүүрэг, 5-р хороо'
+    ]
+];
+
+function clinic_directory() {
+    global $clinicDirectory;
+    return $clinicDirectory;
+}
+
+function get_clinic_metadata($code = 'venera') {
+    $code = trim((string)$code);
+    $dir = clinic_directory();
+    if (isset($dir[$code])) {
+        return $dir[$code];
+    }
+    return $dir['venera'];
+}
 ?>

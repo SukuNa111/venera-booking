@@ -7,6 +7,38 @@ $role   = $u['role'] ?? 'guest';
 $name   = $u['name'] ?? 'Хэрэглэгч';
 $clinic = $u['clinic_id'] ?? 'venera';
 
+// Clinic-specific branding (logo + name)
+$clinicName = 'NG AI';
+$clinicNameDb = null;
+try {
+  $stmt = db()->prepare("SELECT name FROM clinics WHERE code = :c LIMIT 1");
+  $stmt->execute([':c' => $clinic]);
+  $clinicNameDb = $stmt->fetchColumn();
+} catch (Exception $e) {
+  $clinicNameDb = null;
+}
+$clinicMap = [
+  'venera' => 'Венера',
+  'khatan' => 'Гоо Хатан',
+  'luxor'  => 'Голден Луксор'
+];
+$clinicName = $clinicNameDb ?: ($clinicMap[$clinic] ?? 'NG AI');
+
+// Resolve logo: prefer clinic.png (e.g., khatan.png), then logo-<clinic>.png, fallback to logo.png
+$logoFileCandidates = [
+  __DIR__ . '/../public/assets/' . $clinic . '.png',
+  __DIR__ . '/../public/assets/logo-' . $clinic . '.png',
+  __DIR__ . '/../public/assets/logo.png'
+];
+$logoPath = 'assets/logo.png';
+foreach ($logoFileCandidates as $lf) {
+  if (file_exists($lf)) {
+    $logoPath = 'assets/' . basename($lf);
+    break;
+  }
+}
+$logoVer = file_exists(__DIR__ . '/../public/' . $logoPath) ? filemtime(__DIR__ . '/../public/' . $logoPath) : time();
+
 // profile_api.php бүрэн URL (public дотор байгаа)
 $profileApiUrl = app_url('profile_api.php');
 ?>
@@ -150,10 +182,9 @@ main.full { margin-left: 0; }
 <aside class="sidebar-dark" id="sidebar">
   <div class="header" style="padding-bottom:1rem;border-bottom:1px solid rgba(255,255,255,0.04);">
     <div style="display:flex;align-items:center;gap:10px;">
-      <img src="assets/logo.svg" alt="logo" id="siteLogo" style="width:44px;height:44px;border-radius:8px;object-fit:cover;" onerror="this.style.display='none'">
       <div style="display:flex;flex-direction:column;">
-        <strong style="color:#fff;font-size:1rem;">Venera-Dent</strong>
-        <small style="color:#9ca3af">Захиалгын систем</small>
+          <strong style="color:#fff;font-size:1rem;"><img src="<?= htmlspecialchars($logoPath) ?>?v=<?= $logoVer ?>" alt="<?= htmlspecialchars($clinicName) ?>" id="siteLogo" style="width:44px;height:44px;border-radius:8px;object-fit:cover;vertical-align:middle;margin-right:8px;"><?= htmlspecialchars($clinicName) ?></strong>
+          <small style="color:#9ca3af">Захиалгын систем</small>
       </div>
     </div>
   </div>
@@ -162,8 +193,11 @@ main.full { margin-left: 0; }
     <a class="nav-link <?= active('index.php') ?>" href="<?= app_url('index.php') ?>">📅 Үзлэгийн хуваарь</a>
     <?php if (in_array($role, ['admin', 'reception'])): ?>
       <a class="nav-link <?= active('bookings.php') ?>" href="<?= app_url('bookings.php') ?>">📋 Захиалгууд</a>
-      <a class="nav-link <?= active('reports.php') ?>" href="<?= app_url('reports.php') ?>">📊 Тайлан</a>
       <a class="nav-link <?= active('treatments.php') ?>" href="<?= app_url('treatments.php') ?>">🦷 Эмчилгээ</a>
+      <a class="nav-link <?= active('sms_admin.php') ?>" href="<?= app_url('sms_admin.php') ?>">📨 SMS Захиалга</a>
+    <?php endif; ?>
+    <?php if ($role === 'admin'): ?>
+      <a class="nav-link <?= active('reports.php') ?>" href="<?= app_url('reports.php') ?>">📊 Тайлан</a>
     <?php endif; ?>
     <?php if ($role === 'reception'): ?>
       <a class="nav-link <?= active('receptionist.php') ?>" href="<?= app_url('receptionist.php') ?>">🧑‍⚕️ Эмч нэмэх</a>
@@ -202,7 +236,7 @@ main.full { margin-left: 0; }
        style="width:100%;margin-top:6px;background:transparent;color:#f87171;border:1px solid rgba(255,255,255,0.03);border-radius:8px;padding:.45rem .6rem;display:inline-flex;align-items:center;justify-content:center;">🚪 Гарах</a>
   </div>
 
-  <div class="footer">© <?= date('Y') ?> Venera Group</div>
+  <div class="footer">© <?= date('Y') ?> flowlabs</div>
 </aside>
 
 <!-- ===== Profile Modal (all pages) ===== -->
@@ -431,7 +465,18 @@ function openProfileModal() {
 // ===== Avatar load =====
 function loadProfileAvatar() {
   fetch(profileApiUrl('get_avatar'))
-    .then(r => r.json())
+    .then(r => {
+      if (!r.ok) throw new Error('HTTP ' + r.status);
+      return r.text();
+    })
+    .then(text => {
+      try {
+        return JSON.parse(text);
+      } catch(e) {
+        console.error('JSON parse error:', text.substring(0, 200));
+        throw e;
+      }
+    })
     .then(data => {
       const sidebarAvatar = document.getElementById('sidebarAvatar');
       if (data.avatar && sidebarAvatar) {

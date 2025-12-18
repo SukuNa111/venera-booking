@@ -1,8 +1,7 @@
 <?php
 require_once __DIR__ . '/../config.php';
-// Allow admin, reception and doctors to access reports. For doctors we
-// will default the report to their clinic (doctors see clinic-scoped data).
-require_role(['admin', 'reception', 'doctor']);
+// Only admin can access reports
+require_role(['admin']);
 
 // 🔹 Хугацааны шүүлтүүр
 $period = $_GET['period'] ?? 'week';
@@ -25,6 +24,17 @@ $clinics = db()->query("SELECT DISTINCT clinic FROM bookings ORDER BY clinic")->
 
 // 🔹 Тасгуудын жагсаалт
 $departments = db()->query("SELECT DISTINCT department FROM bookings WHERE department IS NOT NULL ORDER BY department")->fetchAll(PDO::FETCH_COLUMN);
+
+// Тасгийн код->Монгол нэрийн зураглал
+$departmentNames = [
+  'general_surgery' => 'Мэс / ерөнхий',
+  'face_surgery' => 'Мэс / нүүр',
+  'nose_surgery' => 'Мэс / хамар',
+  'oral_surgery' => 'Мэс / амны',
+  'hair_clinic' => 'Үс',
+  'non_surgical' => 'Мэсийн бус',
+  'nonsurgical' => 'Мэсийн бус'
+];
 
 // 🔹 Бүх идэвхтэй эмчид
 $allDoctorsCount = db()->query("SELECT COUNT(DISTINCT id) FROM doctors WHERE active = 1")->fetchColumn();
@@ -50,6 +60,7 @@ if (isset($_GET['export']) && $_GET['export'] === 'excel') {
   $exportData = [];
   $grandTotalExport = 0;
   $grandPaidExport = 0;
+  $grandRevenueExport = 0;
   
   foreach ($clinics as $clinic) {
     if ($activeClinic !== 'all' && $activeClinic !== $clinic) continue;
@@ -68,7 +79,8 @@ if (isset($_GET['export']) && $_GET['export'] === 'excel') {
         b.clinic,
         b.department,
         COUNT(b.id) AS total,
-        SUM(CASE WHEN b.status='paid' THEN 1 ELSE 0 END) AS paid_count
+        SUM(CASE WHEN b.status='paid' THEN 1 ELSE 0 END) AS paid_count,
+        COALESCE(SUM(CASE WHEN b.status='paid' THEN b.price ELSE 0 END), 0) AS paid_revenue
       FROM bookings b
       JOIN doctors d ON d.id = b.doctor_id
       WHERE $where
@@ -81,24 +93,27 @@ if (isset($_GET['export']) && $_GET['export'] === 'excel') {
     
     $grandTotalExport += array_sum(array_column($data, 'total'));
     $grandPaidExport += array_sum(array_column($data, 'paid_count'));
+    $grandRevenueExport += array_sum(array_column($data, 'paid_revenue'));
   }
   
   echo "<!DOCTYPE html><html><head><meta charset='UTF-8'></head><body>";
   echo "<table border='1' style='border-collapse: collapse; width: 100%;'>";
-  echo "<tr><th colspan='6' style='background: #3b82f6; color: white; padding: 15px; font-size: 18px;'>ТАЙЛАН - {$label}</th></tr>";
-  echo "<tr><th colspan='6' style='background: #f8f9fa; padding: 10px;'>Экспорт хийсэн огноо: " . date('Y-m-d H:i') . "</th></tr>";
+  echo "<tr><th colspan='7' style='background: #3b82f6; color: white; padding: 15px; font-size: 18px;'>ТАЙЛАН - {$label}</th></tr>";
+  echo "<tr><th colspan='7' style='background: #f8f9fa; padding: 10px;'>Экспорт хийсэн огноо: " . date('Y-m-d H:i') . "</th></tr>";
   
   foreach ($exportData as $clinic => $rows) {
     $clinicTotal = array_sum(array_column($rows, 'total'));
     $clinicPaid = array_sum(array_column($rows, 'paid_count'));
+    $clinicRevenue = array_sum(array_column($rows, 'paid_revenue'));
     $clinicRate = $clinicTotal ? round(($clinicPaid / $clinicTotal) * 100, 1) : 0;
     
-    echo "<tr><td colspan='6' style='background: #e9ecef; padding: 12px; font-weight: bold;'>Эмнэлэг: " . strtoupper($clinic) . " (Нийт: {$clinicTotal}, Төлбөртэй: {$clinicPaid}, Гүйцэтгэл: {$clinicRate}%)</td></tr>";
+    echo "<tr><td colspan='7' style='background: #e9ecef; padding: 12px; font-weight: bold;'>Эмнэлэг: " . strtoupper($clinic) . " (Нийт: {$clinicTotal}, Төлсөн: {$clinicPaid}, Орлого: " . number_format($clinicRevenue, 0, '.', ',') . "₮, Гүйцэтгэл: {$clinicRate}%)</td></tr>";
     echo "<tr style='background: #f1f3f4;'>";
     echo "<th style='padding: 10px; border: 1px solid #ddd;'>#</th>";
     echo "<th style='padding: 10px; border: 1px solid #ddd;'>Эмч</th>";
     echo "<th style='padding: 10px; border: 1px solid #ddd;'>Нийт захиалга</th>";
-    echo "<th style='padding: 10px; border: 1px solid #ddd;'>Төлбөртэй</th>";
+    echo "<th style='padding: 10px; border: 1px solid #ddd;'>Төлсөн</th>";
+    echo "<th style='padding: 10px; border: 1px solid #ddd;'>Орлого</th>";
     echo "<th style='padding: 10px; border: 1px solid #ddd;'>Гүйцэтгэл</th>";
     echo "<th style='padding: 10px; border: 1px solid #ddd;'>Хувь</th>";
     echo "</tr>";
@@ -106,19 +121,20 @@ if (isset($_GET['export']) && $_GET['export'] === 'excel') {
     foreach ($rows as $i => $r) {
       $p = $r['total'] ? round(($r['paid_count'] / $r['total']) * 100, 1) : 0;
       echo "<tr>";
-      echo "<td style='padding: 8px; border: 1px solid #ddd;'>{$i}</td>";
+      echo "<td style='padding: 8px; border: 1px solid #ddd;'>" . ($i + 1) . "</td>";
       echo "<td style='padding: 8px; border: 1px solid #ddd;'>{$r['doctor_name']}</td>";
       echo "<td style='padding: 8px; border: 1px solid #ddd;'>{$r['total']}</td>";
       echo "<td style='padding: 8px; border: 1px solid #ddd;'>{$r['paid_count']}</td>";
+      echo "<td style='padding: 8px; border: 1px solid #ddd; color: #059669; font-weight: bold;'>" . number_format($r['paid_revenue'], 0, '.', ',') . "₮</td>";
       echo "<td style='padding: 8px; border: 1px solid #ddd;'>{$p}%</td>";
       echo "<td style='padding: 8px; border: 1px solid #ddd;'>" . str_repeat('█', min(10, round($p/10))) . "</td>";
       echo "</tr>";
     }
-    echo "<tr style='height: 15px;'><td colspan='6'></td></tr>";
+    echo "<tr style='height: 15px;'><td colspan='7'></td></tr>";
   }
   
   $grandRateExport = $grandTotalExport ? round(($grandPaidExport / $grandTotalExport) * 100, 1) : 0;
-  echo "<tr><td colspan='6' style='background: #1f2937; color: white; padding: 12px; font-weight: bold;'>Нийт: Захиалга: {$grandTotalExport}, Төлбөртэй: {$grandPaidExport}, Гүйцэтгэл: {$grandRateExport}%</td></tr>";
+  echo "<tr><td colspan='7' style='background: #1f2937; color: white; padding: 12px; font-weight: bold;'>Нийт: Захиалга: {$grandTotalExport}, Төлсөн: {$grandPaidExport}, Орлого: " . number_format($grandRevenueExport, 0, '.', ',') . "₮, Гүйцэтгэл: {$grandRateExport}%</td></tr>";
   echo "</table></body></html>";
   exit;
 }
@@ -127,6 +143,8 @@ if (isset($_GET['export']) && $_GET['export'] === 'excel') {
 $allData = [];
 $grandTotal = 0;
 $grandPaid = 0;
+$grandRevenue = 0;
+$grandPaidRevenue = 0;
 
 foreach ($clinics as $clinic) {
   if ($activeClinic !== 'all' && $activeClinic !== $clinic) continue;
@@ -141,7 +159,9 @@ foreach ($clinics as $clinic) {
       SUM(CASE WHEN b.status='online' THEN 1 ELSE 0 END) AS online_count,
       SUM(CASE WHEN b.status='arrived' THEN 1 ELSE 0 END) AS arrived_count,
       SUM(CASE WHEN b.status='pending' THEN 1 ELSE 0 END) AS pending_count,
-      SUM(CASE WHEN b.status='cancelled' THEN 1 ELSE 0 END) AS cancelled_count
+      SUM(CASE WHEN b.status='cancelled' THEN 1 ELSE 0 END) AS cancelled_count,
+      COALESCE(SUM(b.price), 0) AS total_revenue,
+      COALESCE(SUM(CASE WHEN b.status='paid' THEN b.price ELSE 0 END), 0) AS paid_revenue
     FROM bookings b
     JOIN doctors d ON d.id = b.doctor_id
     WHERE b.clinic = ?
@@ -155,6 +175,8 @@ foreach ($clinics as $clinic) {
   $allData[$clinic] = $data;
   $grandTotal += array_sum(array_column($data, 'total'));
   $grandPaid += array_sum(array_column($data, 'paid_count'));
+  $grandRevenue += array_sum(array_column($data, 'total_revenue'));
+  $grandPaidRevenue += array_sum(array_column($data, 'paid_revenue'));
 }
 
 $grandRate = $grandTotal ? round(($grandPaid / $grandTotal) * 100, 1) : 0;
@@ -389,7 +411,7 @@ foreach ($allData as $clinic => $data) {
       display: grid;
       grid-template-columns: repeat(5, 1fr);
       gap: 1.25rem;
-      margin-bottom: 2rem;
+      margin-bottom: 1rem;
     }
 
     .stat-card {
@@ -755,8 +777,10 @@ foreach ($allData as $clinic => $data) {
           <label>Тасаг:</label>
           <select name="department" class="filter-select" onchange="this.form.submit()">
             <option value="all" <?= $activeDepartment=='all'?'selected':'' ?>>🏷️ Бүх тасаг</option>
-            <?php foreach ($departments as $d): ?>
-              <option value="<?= $d ?>" <?= $d==$activeDepartment?'selected':'' ?>><?= $d ?: 'Тодорхойгүй' ?></option>
+            <?php foreach ($departments as $d): 
+              $label = $departmentNames[$d] ?? ($d ?: 'Тодорхойгүй');
+            ?>
+              <option value="<?= htmlspecialchars($d) ?>" <?= $d==$activeDepartment?'selected':'' ?>><?= htmlspecialchars($label) ?></option>
             <?php endforeach; ?>
           </select>
         </div>
@@ -815,6 +839,28 @@ foreach ($allData as $clinic => $data) {
       </div>
     </div>
 
+    <!-- Revenue Stats -->
+    <div class="stats-row" style="grid-template-columns: repeat(3, 1fr); margin-top: -0.5rem;">
+      <div class="stat-card" style="background: linear-gradient(135deg, #ecfdf5 0%, #d1fae5 100%);">
+        <div class="icon" style="background: #10b981; color: white;"><i class="fas fa-money-bill-wave"></i></div>
+        <div class="label">Төлөгдсөн орлого</div>
+        <div class="number" style="color: #059669; font-size: 1.75rem;"><?= number_format($grandPaidRevenue, 0, '.', ',') ?>₮</div>
+        <div class="sub-label">Бодит орлого</div>
+      </div>
+      <div class="stat-card" style="background: linear-gradient(135deg, #eff6ff 0%, #dbeafe 100%);">
+        <div class="icon" style="background: #3b82f6; color: white;"><i class="fas fa-chart-line"></i></div>
+        <div class="label">Нийт борлуулалт</div>
+        <div class="number" style="color: #2563eb; font-size: 1.75rem;"><?= number_format($grandRevenue, 0, '.', ',') ?>₮</div>
+        <div class="sub-label">Бүх захиалга</div>
+      </div>
+      <div class="stat-card" style="background: linear-gradient(135deg, #fefce8 0%, #fef9c3 100%);">
+        <div class="icon" style="background: #eab308; color: white;"><i class="fas fa-percentage"></i></div>
+        <div class="label">Төлбөрийн хувь</div>
+        <div class="number" style="color: #ca8a04; font-size: 1.75rem;"><?= $grandRevenue > 0 ? round(($grandPaidRevenue / $grandRevenue) * 100, 1) : 0 ?>%</div>
+        <div class="sub-label">Орлогын гүйцэтгэл</div>
+      </div>
+    </div>
+
     <!-- Top 3 Doctors -->
     <div class="card-container">
       <h5><i class="fas fa-trophy"></i> Шилдэг 3 Эмч</h5>
@@ -835,6 +881,7 @@ foreach ($allData as $clinic => $data) {
             <div class="top-stats">
               <div class="row"><span>Нийт</span><span style="color: #3b82f6;"><?= $t['total'] ?></span></div>
               <div class="row"><span>Төлбөртэй</span><span style="color: #10b981;"><?= $t['paid_count'] ?></span></div>
+              <div class="row"><span>Орлого</span><span style="color: #059669; font-weight: 700;"><?= number_format($t['paid_revenue'] ?? 0, 0, '.', ',') ?>₮</span></div>
             </div>
             <div class="progress">
               <div class="progress-bar bg-success" style="width: <?= $pr ?>%"></div>
@@ -874,7 +921,8 @@ foreach ($allData as $clinic => $data) {
               <?php endif; ?>
               <th>Эмч</th>
               <th>Нийт</th>
-              <th>Төлбөртэй</th>
+              <th>Төлсөн</th>
+              <th>Орлого</th>
               <th>Гүйцэтгэл</th>
               <th>Үйлдэл</th>
             </tr>
@@ -898,6 +946,7 @@ foreach ($allData as $clinic => $data) {
                 </td>
                 <td><span class="badge-total"><?= $r['total'] ?></span></td>
                 <td><span class="badge-paid"><?= $r['paid_count'] ?></span></td>
+                <td><span class="badge-revenue" style="background: linear-gradient(135deg, #10b981 0%, #059669 100%); color: white; padding: 0.35rem 0.75rem; border-radius: 8px; font-weight: 600; font-size: 0.85rem;"><?= number_format($r['paid_revenue'] ?? 0, 0, '.', ',') ?>₮</span></td>
                 <td>
                   <div class="progress-cell">
                     <div class="progress">
@@ -913,6 +962,7 @@ foreach ($allData as $clinic => $data) {
                     data-clinic="<?= $clinic ?>"
                     data-total="<?= $r['total'] ?>"
                     data-paid="<?= $r['paid_count'] ?>"
+                    data-revenue="<?= $r['paid_revenue'] ?? 0 ?>"
                     data-online="<?= $r['online_count'] ?? 0 ?>"
                     data-arrived="<?= $r['arrived_count'] ?? 0 ?>"
                     data-pending="<?= $r['pending_count'] ?? 0 ?>"
@@ -952,21 +1002,28 @@ foreach ($allData as $clinic => $data) {
             </div>
             
             <div class="row g-3 mb-4">
-              <div class="col-6 col-md-4">
+              <div class="col-6 col-md-3">
                 <div class="detail-stat-card" style="background: #eff6ff; border-radius: 12px; padding: 1rem; text-align: center;">
                   <i class="fas fa-calendar-check" style="font-size: 1.5rem; color: #3b82f6; margin-bottom: 0.5rem;"></i>
                   <h3 id="detailTotal" style="font-weight: 700; color: #1e40af; margin-bottom: 0.25rem;">0</h3>
                   <p style="font-size: 0.8rem; color: #64748b; margin: 0;">Нийт захиалга</p>
                 </div>
               </div>
-              <div class="col-6 col-md-4">
+              <div class="col-6 col-md-3">
                 <div class="detail-stat-card" style="background: #f0fdf4; border-radius: 12px; padding: 1rem; text-align: center;">
-                  <i class="fas fa-money-bill-wave" style="font-size: 1.5rem; color: #10b981; margin-bottom: 0.5rem;"></i>
+                  <i class="fas fa-check-circle" style="font-size: 1.5rem; color: #10b981; margin-bottom: 0.5rem;"></i>
                   <h3 id="detailPaid" style="font-weight: 700; color: #059669; margin-bottom: 0.25rem;">0</h3>
                   <p style="font-size: 0.8rem; color: #64748b; margin: 0;">Төлсөн</p>
                 </div>
               </div>
-              <div class="col-6 col-md-4">
+              <div class="col-6 col-md-3">
+                <div class="detail-stat-card" style="background: linear-gradient(135deg, #ecfdf5 0%, #d1fae5 100%); border-radius: 12px; padding: 1rem; text-align: center;">
+                  <i class="fas fa-money-bill-wave" style="font-size: 1.5rem; color: #059669; margin-bottom: 0.5rem;"></i>
+                  <h3 id="detailRevenue" style="font-weight: 700; color: #047857; margin-bottom: 0.25rem; font-size: 1.25rem;">0₮</h3>
+                  <p style="font-size: 0.8rem; color: #64748b; margin: 0;">Орлого</p>
+                </div>
+              </div>
+              <div class="col-6 col-md-3">
                 <div class="detail-stat-card" style="background: linear-gradient(135deg, #fef3c7 0%, #fde68a 100%); border-radius: 12px; padding: 1rem; text-align: center;">
                   <i class="fas fa-percentage" style="font-size: 1.5rem; color: #d97706; margin-bottom: 0.5rem;"></i>
                   <h3 id="detailRate" style="font-weight: 700; color: #b45309; margin-bottom: 0.25rem;">0%</h3>
@@ -1189,21 +1246,23 @@ foreach ($allData as $clinic => $data) {
     const clinic = btn.dataset.clinic;
     const total = parseInt(btn.dataset.total) || 0;
     const paid = parseInt(btn.dataset.paid) || 0;
+    const revenue = parseFloat(btn.dataset.revenue) || 0;
     const online = parseInt(btn.dataset.online) || 0;
     const arrived = parseInt(btn.dataset.arrived) || 0;
     const pending = parseInt(btn.dataset.pending) || 0;
     const cancelled = parseInt(btn.dataset.cancelled) || 0;
     
-    showDoctorDetail(doctorId, doctorName, clinic, total, paid, online, arrived, pending, cancelled);
+    showDoctorDetail(doctorId, doctorName, clinic, total, paid, revenue, online, arrived, pending, cancelled);
   }
 
-  function showDoctorDetail(doctorId, doctorName, clinic, total, paid, online, arrived, pending, cancelled) {
+  function showDoctorDetail(doctorId, doctorName, clinic, total, paid, revenue, online, arrived, pending, cancelled) {
     // Set values
     document.getElementById('modalDoctorName').innerHTML = '<i class="fas fa-user-md me-2"></i>' + doctorName;
     document.getElementById('detailDoctorName').textContent = doctorName;
     document.getElementById('detailClinic').innerHTML = '<i class="fas fa-hospital me-1"></i>' + clinic.toUpperCase() + ' эмнэлэг';
     document.getElementById('detailTotal').textContent = total;
     document.getElementById('detailPaid').textContent = paid;
+    document.getElementById('detailRevenue').textContent = new Intl.NumberFormat('mn-MN').format(revenue) + '₮';
     document.getElementById('detailOnline').textContent = online;
     document.getElementById('detailArrived').textContent = arrived;
     document.getElementById('detailPending').textContent = pending;

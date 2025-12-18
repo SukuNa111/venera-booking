@@ -21,9 +21,9 @@ if ($_SERVER['REQUEST_METHOD'] === 'GET' && isset($_GET['action']) && $_GET['act
     $avatar_path = __DIR__ . '/../uploads/avatars/' . $u['id'] . '.jpg';
     header('Content-Type: application/json; charset=utf-8');
     if (file_exists($avatar_path)) {
-        echo json_encode(['ok' => true, 'avatar' => '/booking/uploads/avatars/' . $u['id'] . '.jpg?t=' . filemtime($avatar_path)], JSON_UNESCAPED_UNICODE);
+        echo json_encode(['ok' => true, 'avatar' => '/uploads/avatars/' . $u['id'] . '.jpg?t=' . filemtime($avatar_path)], JSON_UNESCAPED_UNICODE);
     } else {
-        echo json_encode(['ok' => false, 'avatar' => null], JSON_UNESCAPED_UNICODE);
+        echo json_encode(['ok' => true, 'avatar' => null], JSON_UNESCAPED_UNICODE);
     }
     exit;
 }
@@ -31,7 +31,11 @@ if ($_SERVER['REQUEST_METHOD'] === 'GET' && isset($_GET['action']) && $_GET['act
 // GET: Fetch profile info
 if ($_SERVER['REQUEST_METHOD'] === 'GET' && isset($_GET['action']) && $_GET['action'] === 'get_profile') {
     header('Content-Type: application/json; charset=utf-8');
-    echo json_encode(['ok' => true, 'name' => $u['name'] ?? '', 'phone' => $u['phone'] ?? ''], JSON_UNESCAPED_UNICODE);
+    // Get full user info from database
+    $st = db()->prepare("SELECT name, phone FROM users WHERE id = ?");
+    $st->execute([$u['id']]);
+    $userData = $st->fetch();
+    echo json_encode(['ok' => true, 'name' => $userData['name'] ?? '', 'phone' => $userData['phone'] ?? ''], JSON_UNESCAPED_UNICODE);
     exit;
 }
 

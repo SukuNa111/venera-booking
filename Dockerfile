@@ -1,9 +1,14 @@
 # Venera-Dent Booking System
 FROM php:8.2-apache
 
-# Install PostgreSQL extension
-RUN apt-get update && apt-get install -y libpq-dev \
-    && docker-php-ext-install pdo pdo_pgsql \
+# Install PostgreSQL extension and GD library for image processing
+RUN apt-get update && apt-get install -y \
+    libpq-dev \
+    libpng-dev \
+    libjpeg-dev \
+    libfreetype6-dev \
+    && docker-php-ext-configure gd --with-freetype --with-jpeg \
+    && docker-php-ext-install pdo pdo_pgsql gd \
     && apt-get clean
 
 # Enable Apache mod_rewrite

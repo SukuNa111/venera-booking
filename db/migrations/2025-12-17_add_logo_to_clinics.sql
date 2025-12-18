@@ -1,0 +1,2 @@
+-- REMOVED: migration archived on user request
+-- Original file moved/removed: 2025-12-17_add_logo_to_clinics.sql

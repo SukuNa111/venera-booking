@@ -19,3 +19,8 @@ uploads/avatars/*
 # OS
 .DS_Store
 Thumbs.db
+db/settings.json
+.env
+*.log
+/vendor/
+node_modules/

@@ -5,5 +5,9 @@
     "default_view": "day",
     "auto_fill": true,
     "send_reminders": true,
-    "patient_lookup_scope": "global"
+    "patient_lookup_scope": "global",
+    "sms_reminder_hours": 2,
+    "sms_confirmation_template": "Sain uu. {clinic_name}: {date} {start}-iin tsag batalgaajlaa. Lawlah utas: {phone1} {phone2}.",
+    "sms_reminder_template": "Sanuulga: {clinic_name}-d {date} {start}-iin tsag 2 tsagiin daraa ehelne. Lawlah utas: {phone1}.",
+    "sms_aftercare_template": "Sain uu {patient}. {clinic_name} baina. {treatment}-iin daraa asuult baival {phone1}-r holbogdon uu."
 }

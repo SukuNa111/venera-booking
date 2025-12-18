@@ -1,0 +1,2 @@
+-- REMOVED: migration archived on user request
+-- Original file moved/removed: 2025-12-17_add_clinic_price_to_treatments.sql
