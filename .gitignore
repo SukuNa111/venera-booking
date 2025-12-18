@@ -24,3 +24,5 @@ db/settings.json
 *.log
 /vendor/
 node_modules/
+Ngc@2025
+Ngc@2025.pub
