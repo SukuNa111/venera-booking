@@ -1,9 +1,35 @@
 <?php
 require_once __DIR__ . '/../config.php';
-require_role(['admin']);
+require_role(['admin', 'super_admin']);
+
+// Local column_exists shim (for environments that don't load api.php helpers)
+if (!function_exists('column_exists')) {
+    function column_exists($table, $column) {
+        try {
+            $st = db()->prepare("SELECT 1 FROM information_schema.columns WHERE table_name = ? AND column_name = ? LIMIT 1");
+            $st->execute([$table, $column]);
+            return (bool)$st->fetchColumn();
+        } catch (Exception $e) {
+            return false;
+        }
+    }
+}
+
+// --- User context ---
+$currentUser = current_user();
+$role = $currentUser['role'] ?? '';
+$isSuper = ($role === 'super_admin');
+$userClinic = $currentUser['clinic_id'] ?? 'venera';
+
+// Column flags (older schemas may miss these)
+$hasUserActive = column_exists('users', 'active');
+$hasUserShow = column_exists('users', 'show_in_calendar');
 
 // --- Эмнэлэг сонгох ---
-$clinic = $_GET['clinic'] ?? ($_SESSION['clinic_id'] ?? 'all');
+// Super admin may switch clinics; admins are locked to their own clinic.
+$clinic = $isSuper
+    ? ($_GET['clinic'] ?? ($_SESSION['clinic_id'] ?? $userClinic))
+    : $userClinic;
 
 // --- Эмнэлэг жагсаалт (баазаас уншина) ---
 $clinics = [];
@@ -29,18 +55,29 @@ try {
     ];
 }
 
+// Restrict clinic options for non-super admins
+if (!$isSuper) {
+    $clinics = array_intersect_key($clinics, [$clinic => true]);
+    if (empty($clinics)) {
+        // ensure the current clinic is present even if not in the DB list
+        $clinics = [$clinic => ucfirst($clinic)];
+    }
+}
+
 // --- Мэргэжлийн жагсаалт (баазнаас авах)
 $specialties = [];
 try {
-    $st_sp = db()->query("SELECT DISTINCT COALESCE(NULLIF(specialty,''),'Ерөнхий эмч') as specialty FROM doctors ORDER BY specialty");
+    $st_sp = db()->query("SELECT DISTINCT COALESCE(NULLIF(specialty,''),'Ерөнхий эмч') as specialty FROM users WHERE role='doctor' ORDER BY specialty");
     $specialties = $st_sp->fetchAll(PDO::FETCH_COLUMN);
     if (empty($specialties)) $specialties = ['Ерөнхий эмч'];
 } catch (Exception $e) {
     $specialties = ['Ерөнхий эмч'];
 }
 
-// --- Бүх идэвхтэй эмчдийн тоо ---
-$totalDoctorsCount = db()->query("SELECT COUNT(id) FROM doctors WHERE active = 1")->fetchColumn();
+$countSql = $hasUserActive
+    ? "SELECT COUNT(id) FROM users WHERE role='doctor' AND active = 1"
+    : "SELECT COUNT(id) FROM users WHERE role='doctor'";
+$totalDoctorsCount = db()->query($countSql)->fetchColumn();
 
 // --- Хугацааны шүүлтүүр ---
 $period = $_GET['period'] ?? 'month';
@@ -83,44 +120,29 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         $phone = trim($_POST['phone'] ?? '');
         $pin = trim($_POST['pin'] ?? '');
 
-        // 🔴 DEBUG: LOG incoming data
-        error_log("🔵 ADD DOCTOR: clinic=$clinic, name=$name, phone=$phone, pin=" . ($pin ? '***' : 'empty'));
-
         if ($name !== '') {
             try {
-                $st = db()->prepare("INSERT INTO doctors (clinic, name, color, active, specialty, department, show_in_calendar, sort_order) VALUES (?, ?, ?, ?, ?, ?, ?, 0)");
-                $result = $st->execute([$clinic, $name, $color, $active, $specialty, $department, $active]);
-                error_log("🔵 Doctor INSERT result: " . ($result ? 'SUCCESS' : 'FAILED'));
+                $pinHash = $pin ? password_hash($pin, PASSWORD_DEFAULT) : '$2y$10$BjMsn7bv7AqwkNrkuQ67SeY/nB6xblaFom8Jj3Vd9oDbZ2b.wFIO2';
+                $cols = [
+                    'name','phone','pin_hash','role','clinic_id','department','specialty','color','created_at'
+                ];
+                $placeholders = ['?','?','?','\'doctor\'','?','?','?','?','NOW()'];
+                $params = [$name, $phone, $pinHash, $clinic, $department, $specialty, $color];
+                if ($hasUserShow) {
+                    $cols[] = 'show_in_calendar';
+                    $placeholders[] = '?';
+                    $params[] = 1;
+                }
+                if ($hasUserActive) {
+                    $cols[] = 'active';
+                    $placeholders[] = '?';
+                    $params[] = $active;
+                }
+                $colSql = implode(',', $cols);
+                $phSql = implode(',', $placeholders);
+                $stUser = db()->prepare("INSERT INTO users ({$colSql}) VALUES ({$phSql})");
+                $stUser->execute($params);
                 $doctor_id = db()->lastInsertId();
-                error_log("🔵 New doctor_id: $doctor_id");
-                
-                // 📌 Automatically create a corresponding user record for the new doctor.
-                try {
-                    if ($phone && $pin) {
-                        $pin_hash = password_hash($pin, PASSWORD_DEFAULT);
-                        $usr = db()->prepare("INSERT INTO users (id, name, phone, pin_hash, role, clinic_id, created_at) VALUES (?, ?, ?, ?, 'doctor', ?, NOW())");
-                        $usr->execute([$doctor_id, $name, $phone, $pin_hash, $clinic]);
-                        error_log("🔵 User created with phone: $phone");
-                    } else {
-                        // Fallback: use default PIN if not provided
-                        $defaultPinHash = '$2y$10$BjMsn7bv7AqwkNrkuQ67SeY/nB6xblaFom8Jj3Vd9oDbZ2b.wFIO2';
-                        $usr = db()->prepare("INSERT INTO users (id, name, phone, pin_hash, role, clinic_id, created_at) VALUES (?, ?, '', ?, 'doctor', ?, NOW())");
-                        $usr->execute([$doctor_id, $name, $defaultPinHash, $clinic]);
-                        error_log("🔵 User created with default PIN");
-                    }
-                } catch (Exception $ex) {
-                    error_log("❌ User creation failed: " . $ex->getMessage());
-                }
-                
-                // Save working hours
-                for ($i=0; $i<7; $i++) {
-                    $start = $_POST['wh_start_' . $i] ?? '09:00';
-                    $end = $_POST['wh_end_' . $i] ?? '18:00';
-                    $avail = isset($_POST['wh_available_' . $i]) && $_POST['wh_available_' . $i] == '1' ? 1 : 0;
-                    $stwh = db()->prepare("INSERT INTO working_hours (doctor_id, day_of_week, start_time, end_time, is_available) VALUES (?,?,?,?,?)");
-                    $stwh->execute([$doctor_id, $i, $start, $end, $avail]);
-                }
-                error_log("🔵 Working hours saved");
                 echo json_encode(['ok'=>true, 'id'=>$doctor_id]);
             } catch (Exception $ex) {
                 error_log("❌ Database error: " . $ex->getMessage());
@@ -139,25 +161,14 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         $active = isset($_POST['active']) ? 1 : 0;
         $specialty = trim($_POST['specialty'] ?? 'Ерөнхий эмч');
         $department = trim($_POST['department'] ?? '');
-        $st = db()->prepare("UPDATE doctors SET name=?, color=?, active=?, specialty=?, department=?, show_in_calendar=? WHERE id=?");
-        $st->execute([$name, $color, $active, $specialty, $department, $active, $id]);
-        // 🛠 Keep user record in sync with doctor record.  Update name and clinic.
-        try {
-            $usrUpd = db()->prepare("UPDATE users SET name=?, clinic_id=? WHERE id=?");
-            $usrUpd->execute([$name, $clinic, $id]);
-        } catch (Exception $ex) {
-            // ignore user update failure
-        }
-        // Update working hours
-        $delwh = db()->prepare("DELETE FROM working_hours WHERE doctor_id=?");
-        $delwh->execute([$id]);
-        for ($i=0; $i<7; $i++) {
-            $start = $_POST['wh_start_' . $i] ?? '09:00';
-            $end = $_POST['wh_end_' . $i] ?? '18:00';
-            $avail = isset($_POST['wh_available_' . $i]) && $_POST['wh_available_' . $i] == '1' ? 1 : 0;
-            $stwh = db()->prepare("INSERT INTO working_hours (doctor_id, day_of_week, start_time, end_time, is_available) VALUES (?,?,?,?,?)");
-            $stwh->execute([$id, $i, $start, $end, $avail]);
-        }
+        $set = ['name=?','color=?','specialty=?','department=?','clinic_id=?'];
+        $params = [$name, $color, $specialty, $department, $clinic];
+        if ($hasUserShow) { $set[] = 'show_in_calendar=?'; $params[] = $active; }
+        if ($hasUserActive) { $set[] = 'active=?'; $params[] = $active; }
+        $params[] = $id;
+        $sql = "UPDATE users SET " . implode(',', $set) . " WHERE id=? AND role='doctor'";
+        $st = db()->prepare($sql);
+        $st->execute($params);
         echo json_encode(['ok'=>true]);
         exit;
     }
@@ -165,15 +176,16 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     if ($action === 'delete') {
         $id = $_POST['id'] ?? 0;
         if ($id) {
-            $st = db()->prepare("DELETE FROM doctors WHERE id=?");
-            $st->execute([$id]);
-            // ❌ Also remove associated user account when doctor is deleted
-            try {
-                $uDel = db()->prepare("DELETE FROM users WHERE id=?");
-                $uDel->execute([$id]);
-            } catch (Exception $ex) {
-                // ignore
-            }
+            $sets = [];
+            $params = [];
+            if ($hasUserActive) { $sets[] = 'active = 0'; }
+            if ($hasUserShow) { $sets[] = 'show_in_calendar = 0'; }
+            if (empty($sets)) { $sets[] = 'role = role'; }
+            $params[] = $id;
+
+            $sql = 'UPDATE users SET ' . implode(', ', $sets) . ' WHERE id=? AND role=\'doctor\'';
+            $st = db()->prepare($sql);
+            $st->execute($params);
             echo json_encode(['ok'=>true]);
         } else {
             echo json_encode(['ok'=>false, 'msg'=>'ID алга.']);
@@ -185,18 +197,25 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
 // --- Эмчдийн KPI статистик (шинэчлэгдсэн) ---
 $kpi_query = "
     SELECT 
-        d.*,
+        u.id,
+        u.name,
+        u.color,
+        u.department,
+        u.specialty,
+        COALESCE(u.clinic_id, 'venera') AS clinic,
+        " . ($hasUserActive ? 'u.active' : '1') . " AS active,
+        " . ($hasUserShow ? 'u.show_in_calendar' : '1') . " AS show_in_calendar,
         COUNT(b.id) as total_bookings,
         SUM(CASE WHEN b.status = 'paid' THEN 1 ELSE 0 END) as paid_count,
         SUM(CASE WHEN b.status = 'cancelled' THEN 1 ELSE 0 END) as cancelled_count,
         SUM(CASE WHEN b.status = 'confirmed' THEN 1 ELSE 0 END) as confirmed_count,
         COUNT(DISTINCT b.patient_name) as unique_patients,
         AVG(b.visit_count) as avg_visits
-    FROM doctors d
-    LEFT JOIN bookings b ON d.id = b.doctor_id 
+    FROM users u
+    LEFT JOIN bookings b ON u.id = b.doctor_id 
         AND b.date BETWEEN ? AND ?
-    WHERE (? = 'all' OR d.clinic = ?)
-    GROUP BY d.id
+    WHERE u.role = 'doctor' AND (? = 'all' OR COALESCE(u.clinic_id,'') = ?)
+    GROUP BY u.id, u.name, u.color, u.department, u.specialty, u.clinic_id, active, show_in_calendar
     ORDER BY total_bookings DESC
 ";
 
@@ -220,16 +239,16 @@ $total_stats['success_rate'] = $total_stats['total_bookings'] ?
 // --- Өдрийн цагийн ачаалал ---
 $workload_query = "
     SELECT 
-        d.id as doctor_id,
+        u.id as doctor_id,
         EXTRACT(HOUR FROM b.start_time)::integer as hour,
         COUNT(b.id) as booking_count
-    FROM doctors d
-    LEFT JOIN bookings b ON d.id = b.doctor_id 
+    FROM users u
+    LEFT JOIN bookings b ON u.id = b.doctor_id 
         AND b.date BETWEEN ? AND ?
         AND b.status != 'cancelled'
-    WHERE (? = 'all' OR d.clinic = ?)
-    GROUP BY d.id, EXTRACT(HOUR FROM b.start_time)
-    ORDER BY d.id, hour
+    WHERE u.role='doctor' AND (? = 'all' OR COALESCE(u.clinic_id,'') = ?)
+    GROUP BY u.id, EXTRACT(HOUR FROM b.start_time)
+    ORDER BY u.id, hour
 ";
 
 $st = db()->prepare($workload_query);
@@ -248,7 +267,8 @@ $doctor_detail = null;
 $doctor_timeline = [];
 
 if ($selected_doctor_id) {
-    $st = db()->prepare("SELECT * FROM doctors WHERE id = ?");
+    $activeExpr = $hasUserActive ? 'active' : '1 as active';
+    $st = db()->prepare("SELECT id, name, color, department, specialty, COALESCE(clinic_id,'venera') AS clinic, {$activeExpr} FROM users WHERE id = ? AND role='doctor'");
     $st->execute([$selected_doctor_id]);
     $doctor_detail = $st->fetch(PDO::FETCH_ASSOC);
     
@@ -280,10 +300,11 @@ if ($selected_doctor_id) {
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <title>📊 Эмч KPI Dashboard — Захиалгын систем</title>
     <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css" rel="stylesheet">
-    <link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css" rel="stylesheet">
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+    <link href="https://cdn.jsdelivr.net/npm/flatpickr/dist/flatpickr.min.css" rel="stylesheet">
     <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/flatpickr"></script>
     <style>
         :root {
             --primary: #6366f1;
@@ -654,6 +675,30 @@ if ($selected_doctor_id) {
         .animate-fade-in {
             animation: fadeInUp 0.5s ease-out forwards;
         }
+    /* Mobile Responsiveness */
+    @media (max-width: 991.98px) {
+      main { 
+        /* Margin and padding handled globally by sidebar.php */
+      }
+      .page-header {
+        padding: 1.5rem;
+        flex-direction: column;
+        align-items: flex-start;
+        gap: 1rem;
+      }
+      .page-header div:last-child {
+        width: 100%;
+        display: flex;
+        gap: 0.5rem;
+      }
+      .page-header .btn {
+        flex: 1;
+        justify-content: center;
+      }
+      .filters-card .row > div {
+        margin-bottom: 1rem;
+      }
+    }
     </style>
 </head>
 <body>
@@ -685,14 +730,29 @@ if ($selected_doctor_id) {
                 </a>
             </div>
 
-            <form method="get" class="mb-0 ms-auto d-flex gap-2 align-items-center">
-                <select name="clinic" class="modern-select" onchange="this.form.submit()">
-                    <option value="all" <?= $clinic=='all'?'selected':'' ?>>🏥 БҮХ ЭМНЭЛГҮҮД</option>
-                    <?php foreach($clinics as $id=>$label): ?>
-                        <option value="<?= $id ?>" <?= $clinic==$id?'selected':'' ?>><?= $label ?></option>
-                    <?php endforeach; ?>
-                </select>
-                <input type="hidden" name="period" value="<?= $period ?>">
+            <form method="get" class="mb-0 ms-auto d-flex gap-2 align-items-center flex-wrap">
+                <?php if ($isSuper): ?>
+                  <select name="clinic" class="modern-select" onchange="this.form.submit()">
+                      <option value="all" <?= $clinic=='all'?'selected':'' ?>>🏥 БҮХ ЭМНЭЛГҮҮД</option>
+                      <?php foreach($clinics as $id=>$label): ?>
+                          <option value="<?= $id ?>" <?= $clinic==$id?'selected':'' ?>><?= $label ?></option>
+                      <?php endforeach; ?>
+                  </select>
+                <?php else: ?>
+                  <select name="clinic" class="modern-select" disabled>
+                      <?php foreach($clinics as $id=>$label): ?>
+                          <option value="<?= $id ?>" selected><?= $label ?></option>
+                      <?php endforeach; ?>
+                  </select>
+                  <input type="hidden" name="clinic" value="<?= htmlspecialchars($clinic) ?>">
+                <?php endif; ?>
+                <div class="d-flex gap-2 align-items-center">
+                    <input type="text" name="start_date" class="form-control date-picker" style="min-width: 150px;" value="<?= htmlspecialchars($start_date) ?>">
+                    <span class="text-muted">→</span>
+                    <input type="text" name="end_date" class="form-control date-picker" style="min-width: 150px;" value="<?= htmlspecialchars($end_date) ?>">
+                    <input type="hidden" name="period" value="custom">
+                    <button type="submit" class="btn-action success"><i class="fas fa-filter me-1"></i>Хугацаагаар</button>
+                </div>
             </form>
 
             <a href="#" onclick="window.print()" class="btn-action success">
@@ -1008,11 +1068,11 @@ if ($selected_doctor_id) {
                             <label class="form-label fw-bold">Тасаг</label>
                             <select name="department" class="form-select" style="border-radius: 8px; border: 2px solid #e5e7eb;">
                                 <option value="">-- Сонгох --</option>
-                                <option value="general_surgery">Мэс / ерөнхий</option>
-                                <option value="nose_surgery">Мэс / хамар</option>
-                                <option value="oral_surgery">Мэс / амны</option>
-                                <option value="hair_clinic">Үс</option>
+                                <option value="surgery">Мэс засал</option>
                                 <option value="non_surgical">Мэсийн бус</option>
+                                <option value="traditional">Уламжлалт</option>
+                                <option value="dental">Шүд</option>
+                                <option value="infusion">Дусал</option>
                             </select>
                         </div>
                         <div class="col-12">
@@ -1159,11 +1219,11 @@ if ($selected_doctor_id) {
                                     style="border: 2px solid #e5e7eb; border-radius: 12px; padding: 0.75rem 1rem;"
                                     onfocus="this.style.borderColor='#6366f1'" onblur="this.style.borderColor='#e5e7eb'">
                                 <option value="">-- Сонгох --</option>
-                                <option value="general_surgery">Мэс / ерөнхий</option>
-                                <option value="nose_surgery">Мэс / хамар</option>
-                                <option value="oral_surgery">Мэс / амны</option>
-                                <option value="hair_clinic">Үс</option>
+                                <option value="surgery">Мэс засал</option>
                                 <option value="non_surgical">Мэсийн бус</option>
+                                <option value="traditional">Уламжлалт</option>
+                                <option value="dental">Шүд</option>
+                                <option value="infusion">Дусал</option>
                             </select>
                         </div>
                     </div>
@@ -1375,65 +1435,14 @@ if ($selected_doctor_id) {
                 deptEl.value = department;
             }
             
-            console.log('📋 Fetching working hours...');
-            
-            // Load working hours from API
-            try {
-                const response = await fetch('api.php?action=doctor_working_hours&id=' + doctorId);
-                const data = await response.json();
-                
-                console.log('✅ API Response:', data);
-                
-                if (data.ok && Array.isArray(data.hours) && data.hours.length > 0) {
-                    console.log(`✅ Found ${data.hours.length} working hour records`);
-                    
-                    for (let i = 0; i < 7; i++) {
-                        const wh = data.hours.find(h => parseInt(h.day_of_week) === i);
-                        const startEl = document.getElementById('whEditStart' + i);
-                        const endEl = document.getElementById('whEditEnd' + i);
-                        const checkEl = document.getElementById('whEditAvail' + i);
-                        
-                        if (wh) {
-                            const startTime = wh.start_time.substring(0, 5);
-                            const endTime = wh.end_time.substring(0, 5);
-                            const isAvailable = (wh.is_available == 1 || wh.is_available == '1');
-                            
-                            if (startEl) startEl.value = startTime;
-                            if (endEl) endEl.value = endTime;
-                            if (checkEl) checkEl.checked = isAvailable;
-                            
-                            console.log(`  Day ${i}: ${startTime}-${endTime}, available=${isAvailable}`);
-                        } else {
-                            // No data for this day, set defaults
-                            if (startEl) startEl.value = '09:00';
-                            if (endEl) endEl.value = '18:00';
-                            if (checkEl) checkEl.checked = true;
-                            console.log(`  Day ${i}: using defaults (no data in DB)`);
-                        }
-                    }
-                } else {
-                    console.warn('⚠️ No working hours found or empty response');
-                    // Set all to defaults
-                    for (let i = 0; i < 7; i++) {
-                        const startEl = document.getElementById('whEditStart' + i);
-                        const endEl = document.getElementById('whEditEnd' + i);
-                        const checkEl = document.getElementById('whEditAvail' + i);
-                        if (startEl) startEl.value = '09:00';
-                        if (endEl) endEl.value = '18:00';
-                        if (checkEl) checkEl.checked = true;
-                    }
-                }
-            } catch (err) {
-                console.error('❌ Error fetching working hours:', err);
-                // Set defaults on error
-                for (let i = 0; i < 7; i++) {
-                    const startEl = document.getElementById('whEditStart' + i);
-                    const endEl = document.getElementById('whEditEnd' + i);
-                    const checkEl = document.getElementById('whEditAvail' + i);
-                    if (startEl) startEl.value = '09:00';
-                    if (endEl) endEl.value = '18:00';
-                    if (checkEl) checkEl.checked = true;
-                }
+            // Set default working hours (static 09:00-18:00)
+            for (let i = 0; i < 7; i++) {
+                const startEl = document.getElementById('whEditStart' + i);
+                const endEl = document.getElementById('whEditEnd' + i);
+                const checkEl = document.getElementById('whEditAvail' + i);
+                if (startEl) startEl.value = '09:00';
+                if (endEl) endEl.value = '18:00';
+                if (checkEl) checkEl.checked = true;
             }
             
             // Show modal
@@ -1533,6 +1542,13 @@ if ($selected_doctor_id) {
                 detailSection.scrollIntoView({ behavior: 'smooth', block: 'start' });
             }, 300);
         }
+
+        // Initialize date pickers
+        flatpickr('.date-picker', {
+            dateFormat: "Y-m-d",
+            allowInput: true,
+            locale: { firstDayOfWeek: 1 }
+        });
     });
     </script>
 

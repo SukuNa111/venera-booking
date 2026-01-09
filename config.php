@@ -76,7 +76,10 @@ function db() {
             $pdo->exec("SET NAMES 'UTF8'");
         }
     } catch (PDOException $e) {
-        http_response_code(500);
+        // Only set HTTP response code if we're in a web context
+        if (php_sapi_name() !== 'cli') {
+            http_response_code(500);
+        }
         echo '❌ DB connection failed: ' . htmlspecialchars($e->getMessage());
         exit;
     }
@@ -102,21 +105,50 @@ function require_login() {
 }
 
 function current_user() {
+    $id   = $_SESSION['uid'] ?? 0;
+    $name = $_SESSION['name'] ?? '';
+    $role = $_SESSION['role'] ?? '';
+    $clinic = $_SESSION['clinic_id'] ?? '';
+    $dept = $_SESSION['department'] ?? '';
+    if ($id && $dept === '') {
+        try {
+            $st = db()->prepare('SELECT department FROM users WHERE id = ?');
+            $st->execute([$id]);
+            $d = (string)$st->fetchColumn();
+            if ($d !== '') {
+                $_SESSION['department'] = $d;
+                $dept = $d;
+            }
+        } catch (Exception $e) {
+            // ignore
+        }
+    }
     return [
-        'id'        => $_SESSION['uid'] ?? 0,
-        'name'      => $_SESSION['name'] ?? '',
-        'role'      => $_SESSION['role'] ?? '',
-        'clinic_id' => $_SESSION['clinic_id'] ?? ''
+        'id'         => $id,
+        'name'       => $name,
+        'role'       => $role,
+        'clinic_id'  => $clinic,
+        'department' => $dept,
+        'is_super_admin' => $role === 'super_admin'
     ];
 }
 
 function require_role($roles) {
     $r = $_SESSION['role'] ?? '';
-    if (!in_array($r, (array)$roles)) {
+    $allowed = (array)$roles;
+    // super_admin автоматаар admin эрхтэй адилхан
+    if ($r === 'super_admin' && in_array('admin', $allowed)) {
+        return;
+    }
+    if (!in_array($r, $allowed)) {
         http_response_code(403);
         echo "<h3 style='color:red;text-align:center;margin-top:2rem'>🚫 Хандалт хориглосон</h3>";
         exit;
     }
+}
+
+function is_super_admin() {
+    return ($_SESSION['role'] ?? '') === 'super_admin';
 }
 
 // -----------------------
@@ -134,6 +166,143 @@ function json_out($arr, $code = 200) {
     header('Content-Type: application/json; charset=utf-8');
     echo json_encode($arr, JSON_UNESCAPED_UNICODE);
     exit;
+}
+
+// -----------------------
+// MBString Shims (for systems without the extension)
+// -----------------------
+if (!function_exists('mb_strtolower')) {
+    function mb_strtolower($text, $encoding = 'UTF-8') {
+        static $map = [
+            'А'=>'а','Б'=>'б','В'=>'в','Г'=>'г','Д'=>'д','Е'=>'е','Ё'=>'ё','Ж'=>'ж','З'=>'з',
+            'И'=>'и','Й'=>'й','К'=>'к','Л'=>'л','М'=>'м','Н'=>'н','О'=>'о','Ө'=>'ө','П'=>'п',
+            'Р'=>'р','С'=>'с','Т'=>'т','У'=>'у','Ү'=>'ү','Ф'=>'ф','Х'=>'х','Ц'=>'ц','Ч'=>'ч',
+            'Ш'=>'ш','Щ'=>'щ','Ъ'=>'ъ','Ы'=>'ы','Ь'=>'ь','Э'=>'э','Ю'=>'ю','Я'=>'я'
+        ];
+        return strtr($text, $map);
+    }
+}
+if (!function_exists('mb_stripos')) {
+    function mb_stripos($haystack, $needle, $offset = 0, $encoding = 'UTF-8') {
+        $h = mb_strtolower($haystack, $encoding);
+        $n = mb_strtolower($needle, $encoding);
+        return stripos($h, $n, $offset);
+    }
+}
+
+// -----------------------
+// Smart Phone Routing (Department-based)
+// -----------------------
+function getPhoneForDepartment($booking_id, $clinic = 'venera', $default_phone = '70115090') {
+    try {
+        // Get booking with treatment info
+        $st = db()->prepare("
+            SELECT b.service_name, b.department AS booking_department, t.department, t.id as treatment_id 
+            FROM bookings b 
+            LEFT JOIN treatments t ON t.name = b.service_name AND (t.clinic = b.clinic OR t.clinic IS NULL)
+            WHERE b.id = ? 
+            LIMIT 1
+        ");
+        $st->execute([$booking_id]);
+        $booking = $st->fetch(PDO::FETCH_ASSOC);
+        
+        if (!$booking) {
+            return $default_phone;
+        }
+        
+        // Helper function to extract phone(s) from value (string or array/json)
+        $extractPhone = function($value) use ($default_phone) {
+            $data = is_string($value) && (strpos($value, '[') === 0 || strpos($value, '{') === 0) ? json_decode($value, true) : $value;
+            if (is_array($data)) {
+                $filtered = array_filter($data, fn($v) => !empty(trim($v)));
+                return !empty($filtered) ? implode(', ', $filtered) : $default_phone;
+            }
+            return !empty(trim($data)) ? $data : $default_phone;
+        };
+
+        // For Khatan clinic: use simple clinic phone
+        if ($clinic === 'khatan') {
+            $st = db()->prepare("SELECT value FROM app_settings WHERE clinic = ? AND key = ? LIMIT 1");
+            $st->execute(['khatan', 'clinic_phone']);
+            $result = $st->fetch(PDO::FETCH_ASSOC);
+            return $result ? $extractPhone($result['value']) : $default_phone;
+        }
+        
+        // For Venera/Golden Luxor: use department phones
+        $st = db()->prepare("SELECT value FROM app_settings WHERE clinic = ? AND key = ? LIMIT 1");
+        $st->execute([$clinic, 'department_phones']);
+        $result = $st->fetch(PDO::FETCH_ASSOC);
+        
+        if (!$result) {
+            return $default_phone;
+        }
+        
+        $dept_phones = json_decode($result['value'], true) ?: [];
+        
+        // Prefer explicit booking.department if present
+        $deptSource = '';
+        if (!empty($booking['booking_department'])) {
+            $deptSource = $booking['booking_department'];
+        } elseif (!empty($booking['department'])) {
+            // Then treatment.department
+            $deptSource = $booking['department'];
+        }
+
+        if ($deptSource !== '') {
+            $deptLower = mb_strtolower(trim($deptSource), 'UTF-8');
+            
+            // Map treatment department to phone key
+            $dept_key_map = [
+                'dental' => 'dental',
+                'шүд' => 'dental',
+                'шүдний тасаг' => 'dental',
+                'traditional' => 'traditional',
+                'уламжлалт' => 'traditional',
+                'уламжлалт анагаа' => 'traditional',
+                'drip' => 'drip',
+                'дусал' => 'drip',
+                'дусал / сувилахуй' => 'drip',
+                'nonsurgical' => 'nonsurgical',
+                'мэсийн бус' => 'nonsurgical',
+                'мэсийн бус гоо сайхан' => 'nonsurgical',
+                'surgical' => 'surgical',
+                'мэс засал' => 'surgical',
+                'үзлэг' => 'examination',
+                'массаж' => 'massage',
+                'massage' => 'massage'
+            ];
+            
+            if (isset($dept_key_map[$deptLower]) && isset($dept_phones[$dept_key_map[$deptLower]])) {
+                return $extractPhone($dept_phones[$dept_key_map[$deptLower]]);
+            }
+        }
+        
+        // Fallback: keyword matching in service name
+        $service = mb_strtolower($booking['service_name'] ?? '', 'UTF-8');
+        $dept_map = [
+            'dental' => ['шүд', 'tooth', 'dent'],
+            'traditional' => ['уламжлалт', 'traditional', 'хөнгө', 'массаж'],
+            'drip' => ['дусал', 'сувилахуй', 'drip', 'iv'],
+            'nonsurgical' => ['мэсийн бус', 'гоо сайхан', 'nonsurgical', 'botox', 'filler', 'тарилга'],
+            'surgical' => ['мэс', 'засал', 'хирург', 'surgical'],
+            'examination' => ['үзлэг', 'examination', 'лаборатори'],
+            'massage' => ['массаж', 'massage']
+        ];
+        
+        foreach ($dept_map as $dept => $keywords) {
+            foreach ($keywords as $keyword) {
+                if (mb_stripos($service, $keyword, 0, 'UTF-8') !== false) {
+                    if (isset($dept_phones[$dept])) {
+                        return $extractPhone($dept_phones[$dept]);
+                    }
+                }
+            }
+        }
+        
+        return $default_phone;
+    } catch (Exception $e) {
+        return $default_phone;
+    }
 }
 
 // -----------------------
@@ -264,27 +433,40 @@ function formatPhoneNumber($phone) {
 // -----------------------
 // Clinic directory (fallback for contact / map data)
 // -----------------------
+// If DB values are missing, SMS templates and UI pull from here.
+// Numbers provided by user; use single number when only one is given.
 $clinicDirectory = [
+    // Venera – main clinic (Gem Palace, 14F)
     'venera' => [
         'name'   => 'Venera',
-        'phone1' => '80806780',
-        'phone2' => '88001234',
-        'map'    => 'https://maps.app.goo.gl/venera-sample',
-        'address'=> 'Улаанбаатар хот, Сүхбаатар дүүрэг'
+        'phone1' => '70115090',   // primary
+        'phone2' => '99303071',   // secondary
+        'map'    => '',
+        'address'=> 'БГД, 4-р хороо, Баруун 4-н зам, МҮЭСТО-ын зүүн талд, Gem Palace төвийн 14 давхарт'
     ],
+    // Venera Dent – dentistry (single number)
+    'dent' => [
+        'name'   => 'Venera Dent',
+        'phone1' => '80806780',   // single contact
+        'phone2' => '',
+        'map'    => '',
+        'address'=> 'БГД, 4-р хороо, Баруун 4-н зам, МҮЭСТО-ын зүүн талд, Gem Palace төвийн 14 давхарт'
+    ],
+    // STELLA төв, 1 давхар (25-р эмийн сангийн буудлын урд) – "Goo Khatan" салбар
     'khatan' => [
         'name'   => 'Goo Khatan',
-        'phone1' => '99303048',
-        'phone2' => '71007100',
-        'map'    => 'https://maps.app.goo.gl/khatan-sample',
-        'address'=> 'Хан-Уул дүүрэг, 3-р хороолол'
+        'phone1' => '70117150',   // primary
+        'phone2' => '99303048',   // secondary
+        'map'    => '',
+        'address'=> '25-р эмийн сангийн буудлын урд, STELLA төв, 1 давхар'
     ],
+    // Мэс энт - Gem Palace, 14 давхар
     'luxor' => [
-        'name'   => 'Golden Luxor',
-        'phone1' => '70337070',
-        'phone2' => '',
-        'map'    => 'https://maps.app.goo.gl/luxor-sample',
-        'address'=> 'Баянзүрх дүүрэг, 5-р хороо'
+        'name'   => 'Мэс энт',
+        'phone1' => '70115090',   // primary
+        'phone2' => '99303071',   // secondary
+        'map'    => '',
+        'address'=> 'БГД, 4-р хороо, Баруун 4-н зам, МҮЭСТО-ын зүүн талд, Gem Palace төвийн 14 давхарт'
     ]
 ];
 
@@ -295,10 +477,162 @@ function clinic_directory() {
 
 function get_clinic_metadata($code = 'venera') {
     $code = trim((string)$code);
+    // Temporarily alias 'luxor' to 'venera' until luxor goes live
+    if ($code === 'luxor') {
+        $code = 'venera';
+    }
     $dir = clinic_directory();
     if (isset($dir[$code])) {
         return $dir[$code];
     }
     return $dir['venera'];
 }
-?>
+
+// -----------------------
+// Template Helper
+// -----------------------
+if (!function_exists('render_template')) {
+    function render_template($tpl, array $vars) {
+        return preg_replace_callback('/\{(\w+)\}/', function($m) use ($vars) {
+            $key = $m[1];
+            return array_key_exists($key, $vars) ? $vars[$key] : $m[0];
+        }, (string)$tpl);
+    }
+}
+
+// -----------------------
+// Latin Converter
+// -----------------------
+if (!function_exists('to_latin')) {
+    function to_latin($text) {
+        static $map = [
+            'А'=>'A','а'=>'a','Б'=>'B','б'=>'b','В'=>'V','в'=>'v','Г'=>'G','г'=>'g','Д'=>'D','д'=>'d','Е'=>'E','е'=>'e','Ё'=>'Yo','ё'=>'yo',
+            'Ж'=>'Zh','ж'=>'zh','З'=>'Z','з'=>'z','И'=>'I','и'=>'i','Й'=>'Y','й'=>'y','К'=>'K','к'=>'k','Л'=>'L','л'=>'l','М'=>'M','м'=>'m',
+            'Н'=>'N','н'=>'n','О'=>'O','о'=>'o','Ө'=>'O','ө'=>'o','П'=>'P','п'=>'p','Р'=>'R','р'=>'r','С'=>'S','с'=>'s','Т'=>'T','т'=>'t',
+            'У'=>'U','у'=>'u','Ү'=>'U','ү'=>'u','Ф'=>'F','ф'=>'f','Х'=>'Kh','х'=>'kh','Ц'=>'Ts','ц'=>'ts','Ч'=>'Ch','ч'=>'ch','Ш'=>'Sh','ш'=>'sh',
+            'Щ'=>'Sh','щ'=>'sh','Ъ'=>'','ъ'=>'','Ы'=>'Y','ы'=>'y','Ь'=>'','ь'=>'','Э'=>'E','э'=>'e','Ю'=>'Yu','ю'=>'yu','Я'=>'Ya','я'=>'ya'
+        ];
+        $out = strtr((string)$text, $map);
+        return preg_replace('/[^A-Za-z0-9@#\/:.,\-\s()?!]/', '', $out);
+    }
+}
+
+/**
+ * Proactively schedules/updates SMS reminders and aftercare messages in the sms_schedule table.
+ * This makes them visible in the "Scheduled SMS" tab and ensures timely delivery.
+ */
+function syncScheduledSMS($booking_id) {
+    try {
+        $st = db()->prepare("
+            SELECT b.*, u.name as doctor_name, c.name as clinic_name 
+            FROM bookings b
+            LEFT JOIN users u ON u.id = b.doctor_id AND u.role='doctor'
+            LEFT JOIN clinics c ON c.code = b.clinic
+            WHERE b.id = ?
+        ");
+        $st->execute([$booking_id]);
+        $booking = $st->fetch(PDO::FETCH_ASSOC);
+        
+        if (!$booking) return;
+        
+        $clinic = $booking['clinic'];
+        $phone = $booking['phone'];
+        $patient = $booking['patient_name'];
+        $date = $booking['date'];
+        $start_time = $booking['start_time'];
+        $status = $booking['status'];
+        
+        // Remove existing pending reminders/aftercare for this booking to avoid duplicates
+        db()->prepare("DELETE FROM sms_schedule WHERE booking_id = ? AND status = 'pending'")->execute([$booking_id]);
+        
+        // If booking is cancelled, don't schedule anything new
+        if (in_array($status, ['cancelled', 'doctor_cancelled'])) {
+            return;
+        }
+
+        // --- 1. REMINDER SMS (2 hours before or day before) ---
+        $reminderTpl = '';
+        $remIsLatin = 1;
+        $remClinName = '';
+        $remClinPhone = '';
+        
+        $tst = db()->prepare("SELECT message, is_latin, clinic_name, clinic_phone FROM sms_templates WHERE type='reminder' AND (clinic = ? OR clinic = 'global') ORDER BY (clinic = ?) DESC LIMIT 1");
+        $tst->execute([$clinic, $clinic]);
+        $trow = $tst->fetch(PDO::FETCH_ASSOC);
+        if ($trow) {
+            $reminderTpl = $trow['message'];
+            $remIsLatin = (int)$trow['is_latin'];
+            $remClinName = $trow['clinic_name'] ?? '';
+            $remClinPhone = $trow['clinic_phone'] ?? '';
+        }
+        
+        if (!$reminderTpl) {
+            $reminderTpl = 'Sain baina uu {patient_name}! Tany zahialga {clinic_name}-d {date} {start_time}-d baina. Lawlax utas: {phone}.';
+        }
+        
+        $finalClinName = to_latin($remClinName ?: ($booking['clinic_name'] ?? strtoupper($clinic)));
+        $defaultPhone = $remClinPhone ?: '70115090';
+        $deptPhone = getPhoneForDepartment($booking_id, $clinic, $defaultPhone);
+        
+        $vars = [
+            'patient_name' => $patient,
+            'date' => date('m-d', strtotime($date)),
+            'start_time' => substr($start_time, 0, 5),
+            'clinic_name' => $finalClinName,
+            'phone' => $deptPhone,
+            'doctor' => $booking['doctor_name'] ?? '',
+            'treatment' => $booking['service_name'] ?? ''
+        ];
+        
+        $remMsg = render_template($reminderTpl, $vars);
+        if ($remIsLatin) $remMsg = to_latin($remMsg);
+        
+        // Calculate Schedule Time: 1 day before at 10:00, or if appt is today, 1.5 hours before
+        $bookingTs = strtotime($date . ' ' . $start_time);
+        $oneDayBeforeTs = strtotime($date . ' -1 day 10:00:00');
+        
+        $remScheduledAt = date('Y-m-d H:i:s', $oneDayBeforeTs);
+        if ($oneDayBeforeTs < time()) {
+            // If already passed, set to 1.5 hours before appointment or NOW if too close
+            $remScheduledAt = date('Y-m-d H:i:s', max(time() + 60, $bookingTs - 5400)); 
+        }
+        
+        // Insert reminder if appt is in future
+        if ($bookingTs > time()) {
+            $insRem = db()->prepare("INSERT INTO sms_schedule (booking_id, phone, message, scheduled_at, type, status) VALUES (?, ?, ?, ?, 'reminder', 'pending')");
+            $insRem->execute([$booking_id, $phone, $remMsg, $remScheduledAt]);
+        }
+
+        // --- 2. AFTERCARE SMS (If treatment has aftercare days) ---
+        $stTreat = db()->prepare("SELECT aftercare_days, aftercare_message FROM treatments WHERE name = ? AND (clinic = ? OR clinic IS NULL) LIMIT 1");
+        $stTreat->execute([$booking['service_name'], $clinic]);
+        $treat = $stTreat->fetch(PDO::FETCH_ASSOC);
+        
+        if ($treat && $treat['aftercare_days'] > 0) {
+            $afterTpl = '';
+            $afterIsLatin = 1;
+            
+            $atst = db()->prepare("SELECT message, is_latin FROM sms_templates WHERE type='aftercare' AND (clinic = ? OR clinic = 'global') ORDER BY (clinic = ?) DESC LIMIT 1");
+            $atst->execute([$clinic, $clinic]);
+            $arow = $atst->fetch(PDO::FETCH_ASSOC);
+            if ($arow) {
+                $afterTpl = $arow['message'];
+                $afterIsLatin = (int)$arow['is_latin'];
+            }
+            
+            $afterMsg = $afterTpl ? render_template($afterTpl, $vars) : ($treat['aftercare_message'] ?: '');
+            if (empty($afterMsg)) {
+                $afterMsg = "Sain baina uu {$patient}! {$finalClinName} emnelegees mendchilj baina. Tany emchilgeenii daraah baydlyyg asuuj baina. Lawlax: {$deptPhone}";
+            }
+            if ($afterIsLatin) $afterMsg = to_latin($afterMsg);
+            
+            $afterScheduledAt = date('Y-m-d 10:30:00', strtotime($date . ' +' . $treat['aftercare_days'] . ' days'));
+            
+            $insAfter = db()->prepare("INSERT INTO sms_schedule (booking_id, phone, message, scheduled_at, type, status) VALUES (?, ?, ?, ?, 'aftercare', 'pending')");
+            $insAfter->execute([$booking_id, $phone, $afterMsg, $afterScheduledAt]);
+        }
+        
+    } catch (Exception $e) {
+        error_log("syncScheduledSMS error: " . $e->getMessage());
+    }
+}

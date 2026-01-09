@@ -1,59 +1,60 @@
 <?php
 require_once __DIR__ . '/../config.php';
-require_role(['admin', 'reception']);
+require_role(['super_admin']);
 
 $currentUser = current_user();
-$isAdmin = $currentUser['role'] === 'admin';
+$role = $currentUser['role'] ?? '';
+$isSuper = is_super_admin();
+$isAdmin = $isSuper; // backward compatibility with UI logic
 $userClinic = $currentUser['clinic_id'] ?? null;
 
 // --- GET хэрэглэгчид ---
-// Ensure that every doctor has a corresponding user record.  When new doctors are
-// added via the doctors management page (or imported from legacy data), they
-// might not yet exist in the `users` table.  We sync them here by creating
-// a user record for each doctor id not present in `users`, using a default PIN
-// hash and blank phone number.  We choose a default PIN of 1234 hashed.
 try {
-    // Fetch all doctor IDs and their names/clinics
-    $doctorRows = db()->query("SELECT id, name, clinic, specialty FROM doctors")->fetchAll(PDO::FETCH_ASSOC);
-    // Fetch existing user IDs
-    $existingUserIds = db()->query("SELECT id FROM users")->fetchAll(PDO::FETCH_COLUMN);
-    $defaultPinHash = '$2y$10$BjMsn7bv7AqwkNrkuQ67SeY/nB6xblaFom8Jj3Vd9oDbZ2b.wFIO2';
-    foreach ($doctorRows as $dr) {
-        if (!in_array($dr['id'], $existingUserIds)) {
-            // Insert a user record for this doctor id
-            $stmt = db()->prepare("INSERT INTO users (id, name, phone, pin_hash, role, clinic_id) VALUES (?, ?, '', ?, 'doctor', ?)");
-            try {
-                $stmt->execute([$dr['id'], $dr['name'], $defaultPinHash, $dr['clinic']]);
-            } catch (Exception $ex) {
-                // If insertion fails (e.g. duplicate id), ignore
-            }
-        }
-    }
-    // Re-fetch users list after sync.  We also left join doctor details for doctor
-    // users to include specialty and doctor clinic.  Non-doctor users will have
-    // NULL specialty and doctor_clinic values.
-    // For reception users, filter to their clinic only
     if ($isAdmin) {
-        $st = db()->query(
-            "SELECT u.*, d.specialty AS doctor_specialty, d.clinic AS doctor_clinic, d.department AS doctor_department
-             FROM users u
-             LEFT JOIN doctors d ON d.id = u.id
-             ORDER BY u.name"
-        );
+        $st = db()->query("SELECT * FROM users ORDER BY name");
     } else {
-        // Reception can only see users from their clinic
-        $st = db()->prepare(
-            "SELECT u.*, d.specialty AS doctor_specialty, d.clinic AS doctor_clinic, d.department AS doctor_department
-             FROM users u
-             LEFT JOIN doctors d ON d.id = u.id
-             WHERE u.clinic_id = ? OR d.clinic = ?
-             ORDER BY u.name"
-        );
-        $st->execute([$userClinic, $userClinic]);
+        $st = db()->prepare("SELECT * FROM users WHERE clinic_id = ? ORDER BY name");
+        $st->execute([$userClinic]);
     }
     $users = $st->fetchAll(PDO::FETCH_ASSOC);
 } catch (Exception $e) {
     $users = [];
+}
+
+// --- Load clinics list ---
+$clinics = [];
+try {
+    $st_cl = db()->query("SELECT code, name FROM clinics WHERE active=1 ORDER BY COALESCE(sort_order,0), id");
+    $clinics = $st_cl->fetchAll(PDO::FETCH_ASSOC);
+    if (empty($clinics)) {
+        $clinics = [
+            ['code' => 'venera', 'name' => 'Венера'],
+            ['code' => 'luxor', 'name' => 'Голден Луксор'],
+            ['code' => 'khatan', 'name' => 'Гоо Хатан']
+        ];
+    }
+    if ($isSuper && !array_filter($clinics, fn($c) => ($c['code'] ?? '') === 'all')) {
+        array_unshift($clinics, ['code' => 'all', 'name' => 'Бүх эмнэлэг']);
+    }
+} catch (Exception $e) {
+    $clinics = [
+        ['code' => 'venera', 'name' => 'Венера'],
+        ['code' => 'luxor', 'name' => 'Голден Луксор'],
+        ['code' => 'khatan', 'name' => 'Гоо Хатан']
+    ];
+    if ($isSuper) {
+        array_unshift($clinics, ['code' => 'all', 'name' => 'Бүх эмнэлэг']);
+    }
+}
+
+// --- Load specialties list ---
+$specialties = [];
+try {
+    $st_sp = db()->query("SELECT DISTINCT COALESCE(NULLIF(specialty,''),'Ерөнхий эмч') as specialty FROM users WHERE role='doctor' ORDER BY specialty");
+    $specialties = $st_sp->fetchAll(PDO::FETCH_COLUMN);
+    if (empty($specialties)) $specialties = ['Ерөнхий эмч'];
+} catch (Exception $e) {
+    $specialties = ['Ерөнхий эмч'];
 }
 
 // --- POST үйлдэл ---
@@ -66,37 +67,40 @@ if ($action === 'add') {
     $role      = trim($_POST['role'] ?? 'reception');
     $pin       = trim($_POST['pin'] ?? '');
     $clinic_id = trim($_POST['clinic_id'] ?? 'venera');
-    $specialty = trim($_POST['specialty'] ?? '');
     $department = trim($_POST['department'] ?? '');
+    $specialty = trim($_POST['specialty'] ?? 'Ерөнхий эмч');
+    $color     = trim($_POST['color'] ?? '#3b82f6');
 
-    // Reception can only add doctors to their own clinic
+    // Reception users cannot add users via this page
     if (!$isAdmin) {
-        $clinic_id = $userClinic; // Force to user's clinic
-        $role = 'doctor'; // Reception can only add doctors
+        echo json_encode(['ok' => false, 'msg' => 'Зөвхөн админ хэрэглэгч нэмэх боломжтой']);
+        exit;
+    }
+
+    if ($role === 'super_admin' && !$isSuper) {
+        echo json_encode(['ok' => false, 'msg' => 'Супер админ эрхийг зөвхөн супер админ үүсгэнэ'] );
+        exit;
+    }
+
+    if ($role === 'doctor' && $clinic_id === 'all' && !$isSuper) {
+        echo json_encode(['ok' => false, 'msg' => 'Эмчид "Бүх эмнэлэг" сонгох боломжгүй']);
+        exit;
     }
 
     if ($name && $phone && $pin) {
         try {
             $pin_hash = password_hash($pin, PASSWORD_DEFAULT);
-            // Insert user
-            $st = db()->prepare("INSERT INTO users (name, phone, pin_hash, role, clinic_id) VALUES (?, ?, ?, ?, ?)");
-            $st->execute([$name, $phone, $pin_hash, $role, $clinic_id]);
-            $userId = db()->lastInsertId();
-            // If the user is a doctor, also create doctor record and default working hours
+            
             if ($role === 'doctor') {
-                // Default color and active status
-                $color  = '#3b82f6';
-                $active = 1;
-                $sort_order = 0;
-                $stDoc = db()->prepare("INSERT INTO doctors (id, clinic, name, color, active, specialty, department, sort_order) VALUES (?, ?, ?, ?, ?, ?, ?, ?)");
-                $stDoc->execute([$userId, $clinic_id, $name, $color, $active, $specialty ?: 'Ерөнхий эмч', $department, $sort_order]);
-                // Create default working hours (09:00-18:00, available) for all days
-                for ($i = 0; $i < 7; $i++) {
-                    $stWh = db()->prepare("INSERT INTO working_hours (doctor_id, day_of_week, start_time, end_time, is_available) VALUES (?, ?, ?, ?, 1)");
-                    $stWh->execute([$userId, $i, '09:00', '18:00']);
-                }
+                $st_usr = db()->prepare("INSERT INTO users (name, phone, pin_hash, role, clinic_id, department, specialty, color, show_in_calendar, active, created_at) VALUES (?, ?, ?, 'doctor', ?, ?, ?, ?, 1, 1, NOW())");
+                $st_usr->execute([$name, $phone, $pin_hash, $clinic_id, $department, $specialty, $color]);
+                $doctor_id = db()->lastInsertId();
+                echo json_encode(['ok' => true, 'msg' => 'Эмч амжилттай нэмэгдлээ', 'id' => $doctor_id]);
+            } else {
+                $st = db()->prepare("INSERT INTO users (name, phone, pin_hash, role, clinic_id, department, created_at) VALUES (?, ?, ?, ?, ?, ?, NOW())");
+                $st->execute([$name, $phone, $pin_hash, $role, $clinic_id, $department]);
+                echo json_encode(['ok' => true, 'msg' => 'Хэрэглэгч амжилттай нэмэгдлээ']);
             }
-            echo json_encode(['ok' => true, 'msg' => 'Хэрэглэгч амжилттай нэмэгдлээ']);
         } catch (Exception $e) {
             echo json_encode(['ok' => false, 'msg' => $e->getMessage()]);
         }
@@ -113,93 +117,60 @@ if ($action === 'update') {
     $phone     = trim($_POST['phone'] ?? '');
     $pin       = trim($_POST['pin'] ?? '');
     $clinic_id = trim($_POST['clinic_id'] ?? '');
-    $specialty = trim($_POST['specialty'] ?? '');
     $department = trim($_POST['department'] ?? '');
+    $specialty = trim($_POST['specialty'] ?? 'Ерөнхий эмч');
+    $color     = trim($_POST['color'] ?? '#3b82f6');
 
-    // Reception can only edit doctors from their clinic
+    // Reception cannot edit users
     if (!$isAdmin) {
-        $clinic_id = $userClinic; // Force to user's clinic
-        $role = 'doctor'; // Can only edit doctors
+        echo json_encode(['ok' => false, 'msg' => 'Зөвхөн админ хэрэглэгч засах боломжтой']);
+        exit;
     }
 
-    if ($id && $name) {
+    if ($role === 'super_admin' && !$isSuper) {
+        echo json_encode(['ok' => false, 'msg' => 'Супер админ эрхийг зөвхөн супер админ олгоно']);
+        exit;
+    }
+
+    // Check current role
+    $stCur = db()->prepare("SELECT role FROM users WHERE id=?");
+    $stCur->execute([$id]);
+    $currentRole = $stCur->fetchColumn() ?: '';
+    
+    // Cannot change role from doctor to non-doctor or vice versa
+    if ($currentRole !== $role && ($currentRole === 'doctor' || $role === 'doctor')) {
+        echo json_encode(['ok' => false, 'msg' => 'Хэрэглэгчийн үүргийг эмч рүү/эсэх өөрчлөх болохгүй']);
+        exit;
+    }
+
+    if ($role === 'doctor' && $clinic_id === 'all' && !$isSuper) {
+        echo json_encode(['ok' => false, 'msg' => 'Эмчид "Бүх эмнэлэг" сонгох боломжгүй']);
+        exit;
+    }
+
+    if ($id && $name && $phone) {
         try {
-            // Fetch current role and phone for later logic
-            $stCur = db()->prepare("SELECT role FROM users WHERE id=?");
-            $stCur->execute([$id]);
-            $currentRole = $stCur->fetchColumn() ?: '';
-            // Update users table
-            $updates = ['name' => $name, 'role' => $role];
-            $params  = [];
-            // Phone update only if provided (allow empty string)
-            $updates['phone'] = $phone;
-            $updates['clinic_id'] = $clinic_id ?: null;
-            // Build dynamic SQL
-            $set = [];
-            foreach ($updates as $col => $val) {
-                $set[] = "$col=?";
-                $params[] = $val;
-            }
-            // If new PIN provided, update pin_hash
-            if ($pin !== '') {
-                $set[] = "pin_hash=?";
-                $params[] = password_hash($pin, PASSWORD_DEFAULT);
-            }
-            $params[] = $id;
-            $sql = "UPDATE users SET " . implode(", ", $set) . " WHERE id=?";
-            $stUpd = db()->prepare($sql);
-            $stUpd->execute($params);
-            // Handle doctor specifics
-            if ($role === 'doctor') {
-                // Check if doctor record exists
-                $stDocCheck = db()->prepare("SELECT COUNT(*) FROM doctors WHERE id=?");
-                $stDocCheck->execute([$id]);
-                $docExists = (int)$stDocCheck->fetchColumn() > 0;
-                if ($docExists) {
-                    // update doctor info (name, clinic, specialty, department)
-                    $stDocUpd = db()->prepare("UPDATE doctors SET name=?, clinic=?, specialty=?, department=? WHERE id=?");
-                    $stDocUpd->execute([$name, $clinic_id, $specialty ?: 'Ерөнхий эмч', $department, $id]);
-                } else {
-                    // create doctor record
-                    $color  = '#3b82f6';
-                    $active = 1;
-                    $sort_order = 0;
-                    $stDocIns = db()->prepare("INSERT INTO doctors (id, clinic, name, color, active, specialty, department, sort_order) VALUES (?,?,?,?,?,?,?,?)");
-                    $stDocIns->execute([$id, $clinic_id, $name, $color, $active, $specialty ?: 'Ерөнхий эмч', $department, $sort_order]);
-                    // Create default working hours
-                    for ($i=0; $i<7; $i++) {
-                        $stWh = db()->prepare("INSERT INTO working_hours (doctor_id, day_of_week, start_time, end_time, is_available) VALUES (?,?,?,?,1)");
-                        $stWh->execute([$id, $i, '09:00', '18:00']);
-                    }
-                }
+            // Build update query
+            if ($pin) {
+                $pin_hash = password_hash($pin, PASSWORD_DEFAULT);
+                $st = db()->prepare("UPDATE users SET name=?, phone=?, pin_hash=?, role=?, clinic_id=?, department=?, specialty=?, color=? WHERE id=?");
+                $st->execute([$name, $phone, $pin_hash, $role, $clinic_id, $department, $specialty, $color, $id]);
             } else {
-                // If role changed from doctor to something else, check for bookings first
-                $stCheck = db()->prepare("SELECT COUNT(*) as cnt FROM bookings WHERE doctor_id = ?");
-                $stCheck->execute([$id]);
-                $bookingCount = $stCheck->fetch()['cnt'] ?? 0;
-                
-                if ($bookingCount > 0) {
-                    echo json_encode(['ok' => false, 'msg' => "Энэ эмчтэй холбоотой $bookingCount захиалга байна. Role солих боломжгүй."]);
-                    exit;
-                }
-                
-                // Remove doctor record and associated working hours
-                $stWhDel = db()->prepare("DELETE FROM working_hours WHERE doctor_id=?");
-                $stWhDel->execute([$id]);
-                $stDocDel = db()->prepare("DELETE FROM doctors WHERE id=?");
-                $stDocDel->execute([$id]);
+                $st = db()->prepare("UPDATE users SET name=?, phone=?, role=?, clinic_id=?, department=?, specialty=?, color=? WHERE id=?");
+                $st->execute([$name, $phone, $role, $clinic_id, $department, $specialty, $color, $id]);
             }
+            
             echo json_encode(['ok' => true, 'msg' => 'Хэрэглэгч амжилттай засагдлаа']);
         } catch (Exception $e) {
             echo json_encode(['ok' => false, 'msg' => $e->getMessage()]);
         }
     } else {
-        echo json_encode(['ok' => false, 'msg' => 'ID болон нэр оруулна уу']);
+        echo json_encode(['ok' => false, 'msg' => 'Нэр, утас заавал оруулна уу']);
     }
     exit;
 }
 
-    if ($action === 'delete') {
+if ($action === 'delete') {
         $id = $_POST['id'] ?? 0;
 
         if ($id) {
@@ -214,12 +185,6 @@ if ($action === 'update') {
                     exit;
                 }
                 
-                // Delete working hours first
-                $stDelWh = db()->prepare("DELETE FROM working_hours WHERE doctor_id=?");
-                $stDelWh->execute([$id]);
-                // Delete doctor record
-                $stDelDoc = db()->prepare("DELETE FROM doctors WHERE id=?");
-                $stDelDoc->execute([$id]);
                 // Delete user record
                 $stDelUser = db()->prepare("DELETE FROM users WHERE id=?");
                 $stDelUser->execute([$id]);
@@ -253,10 +218,14 @@ if (empty($clinics)) {
     ];
 }
 
+if ($isSuper && !array_filter($clinics, fn($c) => ($c['code'] ?? '') === 'all')) {
+    array_unshift($clinics, ['code' => 'all', 'name' => 'Бүх эмнэлэг']);
+}
+
 // --- Specialist list for doctors ---
 $specialties = [];
 try {
-    $sp = db()->query("SELECT DISTINCT COALESCE(NULLIF(specialty,''),'Ерөнхий эмч') AS specialty FROM doctors ORDER BY specialty");
+    $sp = db()->query("SELECT DISTINCT COALESCE(NULLIF(specialty,''),'Ерөнхий эмч') AS specialty FROM users WHERE role='doctor' ORDER BY specialty");
     $specialties = $sp->fetchAll(PDO::FETCH_COLUMN);
     if (empty($specialties)) $specialties = ['Ерөнхий эмч'];
 } catch (Exception $e) {
@@ -390,25 +359,26 @@ try {
         
         /* Main Card */
         .glass-card {
-            background: white;
-            border-radius: 20px;
-            box-shadow: 0 4px 20px rgba(0,0,0,0.05);
-            border: 1px solid rgba(0,0,0,0.05);
+            background: rgba(255, 255, 255, 0.98);
+            backdrop-filter: blur(16px);
+            border-radius: 24px;
+            box-shadow: 0 10px 40px rgba(0,0,0,0.08);
+            border: 1px solid rgba(226, 232, 240, 0.6);
             overflow: hidden;
         }
         
         .card-header-custom {
-            background: linear-gradient(135deg, #f8fafc, #f1f5f9);
-            padding: 1.25rem 1.5rem;
-            border-bottom: 1px solid #e2e8f0;
+            background: linear-gradient(135deg, #6366f1 0%, #8b5cf6 100%);
+            padding: 1.75rem 2rem;
+            border-bottom: 3px solid rgba(139, 92, 246, 0.5);
             display: flex;
             justify-content: space-between;
             align-items: center;
         }
         
         .card-header-custom h5 {
-            font-weight: 600;
-            color: #1e293b;
+            font-weight: 700;
+            color: white;
             margin: 0;
             display: flex;
             align-items: center;
@@ -467,11 +437,12 @@ try {
         
         .modern-table tbody tr {
             border-bottom: 1px solid #f1f5f9;
-            transition: all 0.2s;
+            transition: all 0.2s cubic-bezier(0.4, 0, 0.2, 1);
         }
         
         .modern-table tbody tr:hover {
-            background: linear-gradient(135deg, #faf5ff, #f0f4ff);
+            background: linear-gradient(135deg, rgba(250, 245, 255, 0.6), rgba(240, 244, 255, 0.6));
+            transform: translateX(4px);
         }
         
         .modern-table tbody td {
@@ -481,16 +452,17 @@ try {
         
         /* User Avatar */
         .user-avatar {
-            width: 44px;
-            height: 44px;
-            border-radius: 12px;
+            width: 48px;
+            height: 48px;
+            border-radius: 14px;
             display: flex;
             align-items: center;
             justify-content: center;
             color: white;
-            font-weight: 600;
-            font-size: 1.1rem;
+            font-weight: 700;
+            font-size: 1.15rem;
             text-transform: uppercase;
+            box-shadow: 0 4px 12px rgba(0, 0, 0, 0.15);
         }
         
         .user-avatar.admin { background: linear-gradient(135deg, #6366f1, #8b5cf6); }
@@ -564,7 +536,8 @@ try {
         
         .btn-edit:hover {
             background: linear-gradient(135deg, #fde68a, #fef3c7);
-            transform: translateY(-1px);
+            transform: translateY(-2px);
+            box-shadow: 0 4px 12px rgba(251, 191, 36, 0.25);
         }
         
         .btn-delete {
@@ -574,7 +547,8 @@ try {
         
         .btn-delete:hover {
             background: linear-gradient(135deg, #fecaca, #fee2e2);
-            transform: translateY(-1px);
+            transform: translateY(-2px);
+            box-shadow: 0 4px 12px rgba(220, 38, 38, 0.25);
         }
         
         /* Add Button */
@@ -589,13 +563,13 @@ try {
             align-items: center;
             gap: 0.5rem;
             cursor: pointer;
-            transition: all 0.3s;
-            box-shadow: 0 4px 15px rgba(99, 102, 241, 0.3);
+            transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+            box-shadow: 0 6px 20px rgba(99, 102, 241, 0.35);
         }
         
         .btn-add:hover {
-            transform: translateY(-2px);
-            box-shadow: 0 6px 20px rgba(99, 102, 241, 0.4);
+            transform: translateY(-3px);
+            box-shadow: 0 10px 32px rgba(99, 102, 241, 0.45);
         }
         
         /* Modal Styling */
@@ -815,7 +789,7 @@ try {
                                 <td>
                                     <span class="role-badge <?= htmlspecialchars($user['role']) ?>">
                                         <?php
-                                        $roleNames = ['admin' => 'Админ', 'doctor' => 'Эмч', 'reception' => 'Хүлээн авалт'];
+                                        $roleNames = ['super_admin' => 'Супер админ', 'admin' => 'Админ', 'doctor' => 'Эмч', 'reception' => 'Хүлээн авалт'];
                                         echo $roleNames[$user['role']] ?? $user['role'];
                                         ?>
                                     </span>
@@ -837,7 +811,8 @@ try {
                                             data-phone="<?= htmlspecialchars($user['phone'] ?? '') ?>"
                                             data-clinic="<?= htmlspecialchars($user['clinic_id'] ?: ($user['doctor_clinic'] ?? '')) ?>"
                                             data-specialty="<?= htmlspecialchars($user['doctor_specialty'] ?? '') ?>"
-                                            data-department="<?= htmlspecialchars($user['doctor_department'] ?? '') ?>">
+                                            data-department="<?= htmlspecialchars($user['doctor_department'] ?? '') ?>"
+                                            data-color="<?= htmlspecialchars($user['doctor_color'] ?? '#3b82f6') ?>">
                                         <i class="fas fa-edit"></i> Засах
                                     </button>
                                     <button class="btn-action btn-delete delete-btn" data-id="<?= $user['id'] ?>" data-name="<?= htmlspecialchars($user['name']) ?>">
@@ -889,6 +864,7 @@ try {
                             <label class="form-label"><i class="fas fa-user-tag"></i> Үүрэг</label>
                             <select name="role" class="form-select" required>
                                 <option value="reception">Хүлээн авалт</option>
+                                <option value="super_admin">Супер админ</option>
                                 <option value="admin">Администратор</option>
                                 <option value="doctor">Эмч</option>
                             </select>
@@ -932,12 +908,18 @@ try {
                         <label class="form-label"><i class="fas fa-briefcase-medical"></i> Тасаг</label>
                         <select name="department" class="form-select">
                             <option value="">-- Сонгох --</option>
-                            <option value="general_surgery">Мэс / ерөнхий</option>
-                            <option value="nose_surgery">Мэс / хамар</option>
-                            <option value="oral_surgery">Мэс / амны</option>
-                            <option value="hair_clinic">Үс</option>
-                            <option value="non_surgical">Мэсийн бус</option>
+                            <option value="Мэс засал">Мэс засал</option>
+                            <option value="Мэсийн бус">Мэсийн бус</option>
+                            <option value="Уламжлалт">Уламжлалт</option>
+                            <option value="Шүд">Шүд</option>
+                            <option value="Дусал">Дусал</option>
                         </select>
+                    </div>
+
+                    <div class="mb-3 <?= $isAdmin ? 'doctor-only' : '' ?>" <?= $isAdmin ? 'style="display:none;"' : '' ?>>
+                        <label class="form-label"><i class="fas fa-palette"></i> Өнгө</label>
+                        <input type="color" name="color" class="form-control form-control-color" value="#3b82f6" style="height: 45px; width: 100%;">
+                        <small class="text-muted">Календарь дээр эмчийн өнгө</small>
                     </div>
                 </div>
                 <div class="modal-footer-custom">
@@ -976,6 +958,7 @@ try {
                             <label class="form-label"><i class="fas fa-user-tag"></i> Үүрэг</label>
                             <select name="role" class="form-select" required>
                                 <option value="reception">Хүлээн авалт</option>
+                                <option value="super_admin">Супер админ</option>
                                 <option value="admin">Администратор</option>
                                 <option value="doctor">Эмч</option>
                             </select>
@@ -1017,12 +1000,18 @@ try {
                         <label class="form-label"><i class="fas fa-briefcase-medical"></i> Тасаг</label>
                         <select name="department" class="form-select">
                             <option value="">-- Сонгох --</option>
-                            <option value="general_surgery">Мэс / ерөнхий</option>
-                            <option value="nose_surgery">Мэс / хамар</option>
-                            <option value="oral_surgery">Мэс / амны</option>
-                            <option value="hair_clinic">Үс</option>
-                            <option value="non_surgical">Мэсийн бус</option>
+                            <option value="Мэс засал">Мэс засал</option>
+                            <option value="Мэсийн бус">Мэсийн бус</option>
+                            <option value="Уламжлалт">Уламжлалт</option>
+                            <option value="Шүд">Шүд</option>
+                            <option value="Дусал">Дусал</option>
                         </select>
+                    </div>
+
+                    <div class="mb-3 doctor-only" style="display:none;">
+                        <label class="form-label"><i class="fas fa-palette"></i> Өнгө</label>
+                        <input type="color" name="color" class="form-control form-control-color" style="height: 45px; width: 100%;">
+                        <small class="text-muted">Календарь дээр эмчийн өнгө</small>
                     </div>
                 </div>
                 <div class="modal-footer-custom">
@@ -1078,19 +1067,29 @@ try {
         function toggleRoleAdd() {
             const roleSel = document.querySelector('#addForm select[name="role"]');
             const docFields = document.querySelectorAll('#addForm .doctor-only');
+            const clinicSel = document.querySelector('#addForm select[name="clinic_id"]');
             if (!roleSel) return;
             docFields.forEach(field => {
                 field.style.display = roleSel.value === 'doctor' ? 'block' : 'none';
             });
+            if (roleSel.value === 'doctor' && clinicSel && clinicSel.value === 'all') {
+                const firstClinic = Array.from(clinicSel.options).find(o => o.value !== 'all');
+                if (firstClinic) clinicSel.value = firstClinic.value;
+            }
         }
         
         function toggleRoleEdit() {
             const roleSel = document.querySelector('#editForm select[name="role"]');
             const docFields = document.querySelectorAll('#editForm .doctor-only');
+            const clinicSel = document.querySelector('#editForm select[name="clinic_id"]');
             if (!roleSel) return;
             docFields.forEach(field => {
                 field.style.display = roleSel.value === 'doctor' ? 'block' : 'none';
             });
+            if (roleSel.value === 'doctor' && clinicSel && clinicSel.value === 'all') {
+                const firstClinic = Array.from(clinicSel.options).find(o => o.value !== 'all');
+                if (firstClinic) clinicSel.value = firstClinic.value;
+            }
         }
         
         // Bind role change handlers
@@ -1116,6 +1115,8 @@ try {
                 if (specInput) specInput.value = btn.dataset.specialty || '';
                 const deptInput = form.querySelector('[name="department"]');
                 if (deptInput) deptInput.value = btn.dataset.department || '';
+                const colorInput = form.querySelector('[name="color"]');
+                if (colorInput) colorInput.value = btn.dataset.color || '#3b82f6';
                 toggleRoleEdit();
                 editModal.show();
             });

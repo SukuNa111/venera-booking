@@ -12,130 +12,47 @@ $doctor_id = $u['id'];
 $name      = $u['name'];
 
 $db = db();
+
+// doctor_hours хүснэгт байгаа эсэхийг шалгах туслах функц
+function table_exists(PDO $db, string $table): bool {
+  try {
+    $driver = $db->getAttribute(PDO::ATTR_DRIVER_NAME);
+    if ($driver === 'pgsql') {
+      $st = $db->prepare("SELECT to_regclass(:t)");
+      $st->execute([':t' => "public.$table"]);
+      return (bool)$st->fetchColumn();
+    }
+    // MySQL fallback
+    $st = $db->prepare("
+      SELECT 1
+      FROM information_schema.tables
+      WHERE table_schema = DATABASE() AND table_name = ?
+      LIMIT 1
+    ");
+    $st->execute([$table]);
+    return (bool)$st->fetchColumn();
+  } catch (Exception $e) {
+    return false;
+  }
+}
+
+$hasDoctorHours = table_exists($db, 'doctor_hours');
 $saved = false;
 $error = '';
 
-// 🕒 Хуваарь хадгалах
-//
-// Энэ формоос орж ирсэн өдрийн цагийн мэдээллийг
-// calendar.js-тай нийцтэй байхаар working_hours хүснэгтэд хадгална.
-//
-// working_hours хүснэгт:
-//   doctor_id (FK), day_of_week (0=Ням, 1=Дав, …, 6=Бямба),
-//   start_time, end_time, is_available (1=ажиллана, 0=ажиллахгүй)
-//
-// Нийт 7 өдөр бүхий бүртгэлээ нэг бүрчлэн хадгалах; ажиллахгүй
-// өдөр бүрийн is_available=0 гэж тэмдэглэж өгөх нь calendar.js дээр
-// бүрэн өдөр off–хэсэгт байгаа болохыг илэрхийлэх тул заавал хадгална.
+// Fixed default schedule (working_hours removed); accept POST for UX but do nothing
 if ($_SERVER['REQUEST_METHOD'] === 'POST') {
-  try {
-    $db->beginTransaction();
-
-    // working_hours хүснэгтээс хуучин хуваарийг устгана
-    $stDel = $db->prepare("DELETE FROM working_hours WHERE doctor_id = ?");
-    $stDel->execute([$doctor_id]);
-    // doctor_hours хүснэгтээс хуучин хуваарийг устгана (буцаараар нийцтэй байх)
-    // Хэрэв энэ хүснэгт байхгүй бол алдаа гаргахгүй
-    try {
-      $stDelDoc = $db->prepare("DELETE FROM doctor_hours WHERE doctor_id = ?");
-      $stDelDoc->execute([$doctor_id]);
-    } catch (Exception $e) {
-      // ignore if table doesn't exist
-    }
-
-    // Шинэ хуваарь хадгалах бэлтгэл
-    $stIns = $db->prepare("INSERT INTO working_hours (doctor_id, day_of_week, start_time, end_time, is_available) VALUES (?,?,?,?,?)");
-    // doctor_hours руу хадгалах бэлтгэл (хуучин бүтэц)
-    // weekday талбар нь 1–7, ажиллах өдөрт л оруулна
-    try {
-      $stInsDoc = $db->prepare("INSERT INTO doctor_hours (doctor_id, weekday, time_start, time_end) VALUES (?,?,?,?)");
-    } catch (Exception $e) {
-      $stInsDoc = null;
-    }
-
-    // 1=Даваа … 7=Ням; calendar.js day_of_week 0=Ням, 1=Даваа … 6=Бямба
-    for ($d = 1; $d <= 7; $d++) {
-      // Идэвхтэй эсэх (checkbox)
-      $active  = isset($_POST["active_$d"]);
-      // Үндсэн эхлэх/дуусах цаг
-      $start   = $_POST["start_$d"] ?? '';
-      $end     = $_POST["end_$d"]   ?? '';
-
-      // is_available: ажиллах эсэх
-      $avail   = $active ? 1 : 0;
-
-      // day_of_week DB-д хадгалах утга (0–6). 7 буюу Ням бол 0 болгоно
-      $dow     = ($d == 7) ? 0 : $d;
-
-      // Цагийн утгууд хоосон байвал default 09:00–18:00
-      if (!$start || !$end) {
-        $start = '09:00';
-        $end   = '18:00';
-      }
-
-      // Бүх өдөрт бүртгэл оруулна – working_hours хүснэгтэд ажиллахгүй өдөр ч is_available=0 гэж хадгална
-      $stIns->execute([$doctor_id, $dow, $start, $end, $avail]);
-
-      // Хуучин doctor_hours хүснэгт рүү зөвхөн ажиллах өдөр хадгална
-      if ($avail == 1 && $stInsDoc) {
-        // doctor_hours хүснэгтэд Sunday нь 7 гэж хадгалагддаг
-        $weekday = $d;
-        try {
-          $stInsDoc->execute([$doctor_id, $weekday, $start, $end]);
-        } catch (Exception $e) {
-          // ignore insert errors for compatibility
-        }
-      }
-    }
-
-    $db->commit();
-    $saved = true;
-  } catch (Exception $e) {
-    $db->rollBack();
-    $error = $e->getMessage();
-  }
-}
-
-// 🗂 Одоогийн хадгалсан хуваарь унших
-// working_hours хүснэгтээс авч, UI-гийн index (1–7) руу хөрвүүлнэ.
-// Уншихад эхлээд working_hours хүснэгтээс уншина. Хэрэв хоосон байвал doctor_hours-оос уншиж, is_available=1 гэж бүртгэнэ.
-try {
-  $st = $db->prepare("SELECT day_of_week, start_time, end_time, is_available FROM working_hours WHERE doctor_id = ?");
-  $st->execute([$doctor_id]);
-  $rows = $st->fetchAll(PDO::FETCH_ASSOC);
-} catch (Exception $e) {
-  $rows = [];
+  $saved = true;
 }
 
 $hours = [];
-if (!$rows) {
-  // Fallback: doctor_hours хүснэгтээс унших (хуучин бүтэц)
-  try {
-    $st2 = $db->prepare("SELECT weekday, time_start, time_end FROM doctor_hours WHERE doctor_id = ?");
-    $st2->execute([$doctor_id]);
-    $rowsOld = $st2->fetchAll(PDO::FETCH_ASSOC);
-    foreach ($rowsOld as $r) {
-      $weekday = (int)$r['weekday'];
-      // doctor_hours: 1=Дав … 7=Ням; UI: 1=Дав … 7=Ням
-      $displayDay = $weekday;
-      $hours[$displayDay] = [
-        'day_of_week' => ($weekday == 7 ? 0 : $weekday),
-        'start_time'  => $r['time_start'],
-        'end_time'    => $r['time_end'],
-        'is_available' => 1
-      ];
-    }
-  } catch (Exception $e) {
-    // no fallback
-  }
-} else {
-  foreach ($rows as $r) {
-    $dow = (int)$r['day_of_week'];
-    // DB: 0=Ням, 1=Дав … 6=Бям; UI: 1=Дав … 7=Ням
-    $displayDay = ($dow === 0) ? 7 : $dow;
-    $hours[$displayDay] = $r;
-    $hours[$displayDay]['is_available'] = (int)$r['is_available'];
-  }
+for ($d = 1; $d <= 7; $d++) {
+  $hours[$d] = [
+    'day_of_week' => ($d == 7 ? 0 : $d),
+    'start_time'  => '09:00',
+    'end_time'    => '18:00',
+    'is_available' => 1
+  ];
 }
 
 // 🗓 Өдрийн нэрүүд
@@ -153,10 +70,11 @@ $days = [
 <html lang="mn">
 <head>
   <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Ажлын цаг - <?= htmlspecialchars($name) ?></title>
+  <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css" rel="stylesheet">
+  <link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css" rel="stylesheet">
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
-  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
   <style>
     * { margin: 0; padding: 0; box-sizing: border-box; }
     body {
@@ -650,4 +568,5 @@ $days = [
   </div>
 </main>
 </body>
+<script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"></script>
 </html>

@@ -5,6 +5,7 @@ require_role(['admin', 'reception']);
 
 $currentUser = current_user();
 $role = $currentUser['role'] ?? '';
+$isAdmin = in_array($role, ['admin','super_admin'], true);
 
 // Small helper to safely detect column existence (for older schemas)
 function column_exists_local($table, $column) {
@@ -32,7 +33,8 @@ foreach ($clinics as $c) {
 }
 
 // Apply clinic filter: admins can switch; others fixed to their clinic
-if ($role === 'admin') {
+$clinicFilter = '';
+if ($isAdmin) {
   $clinicFilter = trim($_GET['clinic'] ?? '');
 } else {
   $clinicFilter = trim($currentUser['clinic_id'] ?? '');
@@ -82,10 +84,13 @@ $scheduled = db()->query("SELECT s.*, b.patient_name FROM sms_schedule s LEFT JO
 <html lang="mn">
 <head>
   <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Эмчилгээ & Үнийн жагсаалт</title>
+  <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css" rel="stylesheet">
+  <link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css" rel="stylesheet">
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
-  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/flatpickr/dist/flatpickr.min.css">
+  <script src="https://cdn.jsdelivr.net/npm/flatpickr"></script>
   <style>
     * { margin: 0; padding: 0; box-sizing: border-box; }
     body {
@@ -262,6 +267,43 @@ $scheduled = db()->query("SELECT s.*, b.patient_name FROM sms_schedule s LEFT JO
       .form-row, .form-row-3 { grid-template-columns: 1fr; }
       .radio-group { flex-direction: column; }
     }
+    
+    /* Profile modal dark readonly/disabled fix (stronger override) */
+    .modal-content input[readonly],
+    .modal-content input[disabled],
+    .modal-content textarea[readonly],
+    .modal-content textarea[disabled] {
+      background-color: #1e293b !important;
+      color: #cbd5e1 !important;
+      border-color: #334155 !important;
+      opacity: 1 !important;
+      -webkit-text-fill-color: #cbd5e1 !important;
+      box-shadow: none !important;
+    }
+    .modal-content input[readonly]::placeholder,
+    .modal-content input[disabled]::placeholder {
+      color: #64748b !important;
+      opacity: 1 !important;
+    }
+  /* Mobile Responsiveness */
+  @media (max-width: 991.98px) {
+    main { 
+      /* Margin and padding handled globally by sidebar.php */
+    }
+    .page-header {
+      padding: 1.5rem;
+      flex-direction: column;
+      align-items: flex-start;
+      gap: 1.25rem;
+    }
+    .page-header .btn {
+      width: 100%;
+      justify-content: center;
+    }
+    #searchTreatment {
+      width: 100%;
+    }
+  }
   </style>
 </head>
 <body>
@@ -297,7 +339,7 @@ $scheduled = db()->query("SELECT s.*, b.patient_name FROM sms_schedule s LEFT JO
         <option value="<?= htmlspecialchars($cat) ?>"><?= htmlspecialchars($cat) ?></option>
         <?php endforeach; ?>
       </select>
-      <?php if ($role === 'admin'): ?>
+      <?php if ($isAdmin): ?>
         <select id="clinicFilter" onchange="onClinicChange(this.value)">
           <option value="" <?= $clinicFilter === '' ? 'selected' : '' ?>>Бүх эмнэлэг</option>
           <?php foreach ($clinics as $c): ?>
@@ -341,7 +383,10 @@ $scheduled = db()->query("SELECT s.*, b.patient_name FROM sms_schedule s LEFT JO
               $isNewCategory = $t['category'] !== $currentCategory && !empty($t['category']);
               if ($isNewCategory) $currentCategory = $t['category'];
             ?>
-            <tr data-name="<?= htmlspecialchars(strtolower($t['name'])) ?>" data-category="<?= htmlspecialchars($t['category'] ?? '') ?>">
+            <?php
+              $searchIndex = strtolower(trim(($t['name'] ?? '') . ' ' . ($t['category'] ?? '') . ' ' . ($clinicNames[$t['clinic']] ?? $t['clinic'] ?? '') . ' ' . ($t['aftercare_message'] ?? '')));
+            ?>
+            <tr data-name="<?= htmlspecialchars(strtolower($t['name'])) ?>" data-category="<?= htmlspecialchars($t['category'] ?? '') ?>" data-search="<?= htmlspecialchars($searchIndex) ?>">
               <td><strong><?= htmlspecialchars($t['name']) ?></strong></td>
               <td>
                 <?php if (!empty($t['category'])): ?>
@@ -375,7 +420,14 @@ $scheduled = db()->query("SELECT s.*, b.patient_name FROM sms_schedule s LEFT JO
               </td>
               <td>
                 <?php if ($t['aftercare_days'] > 0): ?>
-                <span class="badge badge-aftercare"><?= $t['aftercare_days'] ?> хоног</span>
+                <div style="display:flex;flex-direction:column;gap:4px;min-width:120px;">
+                  <span class="badge badge-aftercare"><?= $t['aftercare_days'] ?> хоног</span>
+                  <?php if (!empty($t['aftercare_message'])): ?>
+                  <span style="font-size:12px;color:#64748b;line-height:1.3;" title="<?= htmlspecialchars($t['aftercare_message']) ?>">
+                    <?= htmlspecialchars(mb_substr($t['aftercare_message'], 0, 28)) ?><?= mb_strlen($t['aftercare_message']) > 28 ? '…' : '' ?>
+                  </span>
+                  <?php endif; ?>
+                </div>
                 <?php else: ?>
                 <span style="color:#94a3b8">-</span>
                 <?php endif; ?>
@@ -432,7 +484,17 @@ $scheduled = db()->query("SELECT s.*, b.patient_name FROM sms_schedule s LEFT JO
             <td style="max-width:200px; font-size:12px; color:#64748b;" title="<?= htmlspecialchars($s['message'] ?? '') ?>">
               <?= htmlspecialchars(mb_substr($s['message'] ?? '-', 0, 40)) ?><?= mb_strlen($s['message'] ?? '') > 40 ? '...' : '' ?>
             </td>
-            <td><?= $s['scheduled_at'] ?></td>
+            <td>
+              <?php
+                try {
+                  $dt = new DateTime($s['scheduled_at'], new DateTimeZone('UTC'));
+                  $dt->setTimezone(new DateTimeZone('Asia/Ulaanbaatar'));
+                  echo htmlspecialchars($dt->format('Y-m-d H:i'));
+                } catch (Exception $e) {
+                  echo htmlspecialchars(date('Y-m-d H:i', strtotime($s['scheduled_at'])));
+                }
+              ?>
+            </td>
             <td>
               <span class="badge badge-<?= $s['status'] ?>">
                 <?php
@@ -450,6 +512,9 @@ $scheduled = db()->query("SELECT s.*, b.patient_name FROM sms_schedule s LEFT JO
               <div class="btn-group">
                 <button onclick='openSmsEditModal(<?= json_encode($s, JSON_HEX_APOS | JSON_HEX_QUOT) ?>)' class="btn-icon btn-edit" title="Засах">
                   <i class="fas fa-pen"></i>
+                </button>
+                <button onclick="sendNowSms(<?= $s['id'] ?>)" class="btn-icon" title="Одоо илгээх">
+                  <i class="fas fa-paper-plane"></i>
                 </button>
                 <button onclick="deleteSms(<?= $s['id'] ?>)" class="btn-icon btn-delete" title="Устгах">
                   <i class="fas fa-trash"></i>
@@ -541,23 +606,24 @@ $scheduled = db()->query("SELECT s.*, b.patient_name FROM sms_schedule s LEFT JO
         <div class="form-group">
           <label>After Care мессеж</label>
           <input type="text" name="aftercare_message" id="treatmentAftercareMsg" placeholder="Латин үсгээр...">
+          <small>Жишээ: {patient_name}, {clinic_name}, {date}, {start_time}</small>
         </div>
       </div>
       
       <div class="form-row">
         <div class="form-group">
           <label>Эмнэлэг</label>
-          <select name="clinic" id="treatmentClinic" <?= $role === 'admin' ? '' : 'disabled' ?>>
+          <select name="clinic" id="treatmentClinic" <?= $isAdmin ? '' : 'disabled' ?>>
             <?php foreach ($clinics as $c): ?>
             <option value="<?= htmlspecialchars($c['code']) ?>" <?= $clinicFilter === $c['code'] ? 'selected' : '' ?>>
               <?= htmlspecialchars($c['name']) ?>
             </option>
             <?php endforeach; ?>
           </select>
-          <?php if ($role !== 'admin'): ?>
+          <?php if (!$isAdmin): ?>
             <input type="hidden" name="clinic" value="<?= htmlspecialchars($clinicFilter) ?>">
           <?php endif; ?>
-          <small><?= $role === 'admin' ? 'Админ эмнэлэг сонгож болно' : 'Таны эмнэлэгт хадгална' ?></small>
+          <small><?= $isAdmin ? 'Админ эмнэлэг сонгож болно' : 'Таны эмнэлэгт хадгална' ?></small>
         </div>
         <div class="form-group">
           <label>Үнэ гараар оруулах</label>
@@ -596,14 +662,13 @@ function onClinicChange(val) {
 }
 
 function filterTable() {
-  const search = document.getElementById('searchInput').value.toLowerCase();
-  const category = document.getElementById('categoryFilter').value;
+  const searchTerms = (document.getElementById('searchInput').value || '').toLowerCase().trim().split(/\s+/).filter(x => x.length > 0);
+  const category = (document.getElementById('categoryFilter').value || '').trim();
   const rows = document.querySelectorAll('#treatmentsTable tbody tr');
-  
   rows.forEach(row => {
-    const name = row.dataset.name || '';
+    const idx = (row.dataset.search || row.dataset.name || '').toLowerCase();
     const cat = row.dataset.category || '';
-    const matchSearch = name.includes(search);
+    const matchSearch = searchTerms.length === 0 || searchTerms.every(term => idx.includes(term));
     const matchCategory = !category || cat === category;
     row.style.display = matchSearch && matchCategory ? '' : 'none';
   });
@@ -721,8 +786,64 @@ function openSmsEditModal(sms) {
   document.getElementById('smsId').value = sms.id;
   document.getElementById('smsPhone').value = sms.phone;
   document.getElementById('smsMessage').value = sms.message || '';
-  document.getElementById('smsScheduledAt').value = sms.scheduled_at ? sms.scheduled_at.replace(' ', 'T').slice(0, 16) : '';
+  document.getElementById('smsBookingId').value = sms.booking_id || '';
+  document.getElementById('bookingSearchResults').style.display = 'none';
+  // Convert DB UTC time to Asia/Ulaanbaatar local for input
+  try {
+    if (sms.scheduled_at) {
+      const utcStr = sms.scheduled_at.replace(' ', 'T') + 'Z'; // treat as UTC
+      const d = new Date(utcStr);
+      // Format parts in Asia/Ulaanbaatar timezone
+      const parts = new Intl.DateTimeFormat('en-CA', {
+        timeZone: 'Asia/Ulaanbaatar',
+        year: 'numeric', month: '2-digit', day: '2-digit',
+        hour: '2-digit', minute: '2-digit', hour12: false
+      }).formatToParts(d);
+      const map = Object.fromEntries(parts.map(p => [p.type, p.value]));
+      const val = `${map.year}-${map.month}-${map.day}T${map.hour}:${map.minute}`;
+      document.getElementById('smsScheduledAt').value = val;
+    } else {
+      document.getElementById('smsScheduledAt').value = '';
+    }
+  } catch (e) {
+    document.getElementById('smsScheduledAt').value = sms.scheduled_at ? sms.scheduled_at.replace(' ', 'T').slice(0, 16) : '';
+  }
   document.getElementById('smsModal').style.display = 'flex';
+}
+
+async function searchBookingByPhone() {
+  const phone = document.getElementById('smsPhone').value.trim();
+  if (!phone) {
+    alert('Утас оруулна уу');
+    return;
+  }
+  try {
+    const res = await fetch('api.php?action=search_bookings', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ phone })
+    });
+    const json = await res.json();
+    if (json.ok && json.results.length > 0) {
+      const container = document.getElementById('bookingSearchResults');
+      container.innerHTML = '<strong>Олдсон захиалга:</strong><br>' + json.results.map(r =>
+        `<div style="cursor:pointer;padding:4px;margin-top:4px;background:#fff;border-radius:4px" onclick="selectBooking(${r.id}, '${r.patient_name}', '${r.date}')">` +
+        `#${r.id} - ${r.patient_name} - ${r.date} ${r.start_time}</div>`
+      ).join('');
+      container.style.display = 'block';
+    } else {
+      alert('Захиалга олдсонгүй');
+    }
+  } catch (err) {
+    console.error(err);
+    alert('Хайлтанд алдаа гарлаа');
+  }
+}
+
+function selectBooking(id, name, date) {
+  document.getElementById('smsBookingId').value = id;
+  document.getElementById('bookingSearchResults').style.display = 'none';
+  alert(`Booking #${id} (${name}, ${date}) холбогдлоо`);
 }
 
 function closeSmsModal() {
@@ -732,12 +853,27 @@ function closeSmsModal() {
 async function saveSms(e) {
   e.preventDefault();
   const form = e.target;
+  const bookingIdVal = form.booking_id.value.trim();
   const data = {
     id: parseInt(form.id.value),
     phone: form.phone.value.trim(),
     message: form.message.value.trim(),
-    scheduled_at: form.scheduled_at.value.replace('T', ' ') + ':00'
+    // Convert local (Asia/Ulaanbaatar) input to UTC before sending to server
+    scheduled_at: (function(inp){
+      try {
+        // `datetime-local` has no TZ; JS parses as local system time
+        const dLocal = new Date(inp);
+        // Convert to UTC ISO and then to "YYYY-MM-DD HH:MM:SS"
+        const iso = new Date(dLocal.getTime() - dLocal.getTimezoneOffset()*60000).toISOString();
+        return iso.slice(0,19).replace('T',' ');
+      } catch (e) {
+        return inp.replace('T',' ') + ':00';
+      }
+    })(form.scheduled_at.value)
   };
+  if (bookingIdVal !== '' && bookingIdVal !== '0') {
+    data.booking_id = parseInt(bookingIdVal);
+  }
   
   try {
     const res = await fetch('api.php?action=update_sms', {
@@ -779,6 +915,28 @@ async function deleteSms(id) {
     alert('❌ Сервертэй холбогдож чадсангүй');
   }
 }
+
+async function sendNowSms(id) {
+  if (!confirm('Одоо илгээх үү?')) return;
+  try {
+    const res = await fetch('api.php?action=send_sms_now', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ id })
+    });
+    const json = await res.json();
+    if (json.ok) {
+      alert('Илгээгдлээ');
+    } else {
+      alert('❌ Алдаа: ' + (json.msg || 'Unknown error'));
+    }
+    // Reload regardless so the new статус (sent/failed) reflects in the list
+    location.reload();
+  } catch (err) {
+    console.error(err);
+    alert('❌ Сервертэй холбогдож чадсангүй');
+  }
+}
 </script>
 
 <!-- SMS Edit Modal -->
@@ -794,11 +952,21 @@ async function deleteSms(id) {
       <div class="form-group">
         <label>Утасны дугаар</label>
         <input type="text" name="phone" id="smsPhone" required>
+        <button type="button" onclick="searchBookingByPhone()" style="margin-top:4px;font-size:0.85rem">🔍 Захиалга хайх</button>
+      </div>
+      
+      <div id="bookingSearchResults" style="display:none;margin-top:8px;padding:8px;background:#f0f9ff;border-radius:6px;max-height:150px;overflow:auto;">
+        <!-- Results populated by JS -->
+      </div>
+      
+      <div class="form-group">
+        <label>Booking ID (optional)</label>
+        <input type="number" name="booking_id" id="smsBookingId" placeholder="0 = no booking">
       </div>
       
       <div class="form-group">
         <label>Илгээх огноо</label>
-        <input type="datetime-local" name="scheduled_at" id="smsScheduledAt" required>
+        <input type="text" name="scheduled_at" id="smsScheduledAt" class="datetime-picker" required>
       </div>
       
       <div class="form-group">
@@ -814,5 +982,16 @@ async function deleteSms(id) {
   </div>
 </div>
 
+  <script>
+    document.addEventListener('DOMContentLoaded', function() {
+      flatpickr('.datetime-picker', {
+        enableTime: true,
+        dateFormat: "Y-m-d H:i",
+        time_24hr: true,
+        locale: { firstDayOfWeek: 1 }
+      });
+    });
+  </script>
+  <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"></script>
 </body>
 </html>

@@ -8,7 +8,8 @@ $name   = $u['name'] ?? 'Хэрэглэгч';
 $clinic = $u['clinic_id'] ?? 'venera';
 
 // Clinic-specific branding (logo + name)
-$clinicName = 'NG AI';
+// Default clinic name will be replaced if found in DB or map
+$clinicName = 'Клиник';
 $clinicNameDb = null;
 try {
   $stmt = db()->prepare("SELECT name FROM clinics WHERE code = :c LIMIT 1");
@@ -18,18 +19,24 @@ try {
   $clinicNameDb = null;
 }
 $clinicMap = [
-  'venera' => 'Венера',
-  'khatan' => 'Гоо Хатан',
-  'luxor'  => 'Голден Луксор'
+  'venera' => 'Venera V.I.P Clinic',
+  'khatan' => 'Goo Khatan Medical',
+  'luxor'  => 'Golden Luxor',
+  'dent'   => 'Venera Dent',
+  'all'    => 'Бүх эмнэлэг'
 ];
-$clinicName = $clinicNameDb ?: ($clinicMap[$clinic] ?? 'NG AI');
+$clinicName = $clinicNameDb ?: ($clinicMap[$clinic] ?? 'Клиник');
 
 // Resolve logo: prefer clinic.png (e.g., khatan.png), then logo-<clinic>.png, fallback to logo.png
 $logoFileCandidates = [
   __DIR__ . '/../public/assets/' . $clinic . '.png',
   __DIR__ . '/../public/assets/logo-' . $clinic . '.png',
+  __DIR__ . '/../public/assets/logo_flowlab.png',
   __DIR__ . '/../public/assets/logo.png'
 ];
+if ($clinic === 'all') {
+  array_unshift($logoFileCandidates, __DIR__ . '/../public/assets/logo_flowlab.png');
+}
 $logoPath = 'assets/logo.png';
 foreach ($logoFileCandidates as $lf) {
   if (file_exists($lf)) {
@@ -67,11 +74,37 @@ body {
   background: var(--sidebar-bg);
   color: var(--sidebar-text);
   padding: 1rem;
-  overflow-y: auto;
-  z-index: 90;
-  transition: transform 0.3s ease;
+  z-index: 1050;
+  transition: transform 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
 }
+
 .sidebar-dark.closed { transform: translateX(-100%); }
+
+/* Mobile state: closed by default on small screens */
+@media (max-width: 991.98px) {
+  .sidebar-dark {
+    transform: translateX(-100%);
+    box-shadow: 10px 0 30px rgba(0,0,0,0.3);
+  }
+  .sidebar-dark.open {
+    transform: translateX(0);
+  }
+}
+
+/* Backdrop for mobile */
+.sidebar-backdrop {
+  position: fixed;
+  top: 0; left: 0; right: 0; bottom: 0;
+  background: rgba(0,0,0,0.5);
+  z-index: 1040;
+  display: none;
+  backdrop-filter: blur(2px);
+}
+.sidebar-backdrop.show { display: block; }
+
 .sidebar-dark .header {
   display: flex; align-items: center; gap: 0.6rem; margin-bottom: 1rem;
 }
@@ -139,15 +172,44 @@ body {
   text-align: center;
 }
 
-/* ===== Main ===== */
-main {
+/* ===== Main & Main Content Synergy ===== */
+main, .main-content {
   margin-left: 250px;
   padding: 1.2rem;
   background: var(--light-bg);
   min-height: 100vh;
-  transition: margin-left 0.3s ease;
+  transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
 }
-main.full { margin-left: 0; }
+main.full, .main-content.full { margin-left: 0; }
+
+@media (max-width: 991.98px) {
+  main, .main-content { margin-left: 0 !important; padding: 1rem; }
+}
+
+/* Global Mobile Toggle */
+.mobile-toggle-btn {
+  position: fixed;
+  bottom: 20px;
+  right: 20px;
+  width: 50px;
+  height: 50px;
+  border-radius: 50%;
+  background: var(--primary);
+  color: white;
+  display: none;
+  align-items: center;
+  justify-content: center;
+  z-index: 1060;
+  box-shadow: 0 4px 15px rgba(0,0,0,0.3);
+  border: none;
+  cursor: pointer;
+  transition: transform 0.2s;
+}
+.mobile-toggle-btn:active { transform: scale(0.9); }
+
+@media (max-width: 991.98px) {
+  .mobile-toggle-btn { display: flex; }
+}
 
 /* ===== Toolbar ===== */
 .calendar-toolbar {
@@ -176,7 +238,33 @@ main.full { margin-left: 0; }
 .dark-mode { background: #1e293b; color: #e5e7eb; }
 .dark-mode main { background: #0f172a; color: #e5e7eb; }
 .dark-mode .sidebar-dark { background: #0f172a; }
+
+/* Profile modal dark readonly/disabled fix (stronger override, global) */
+.modal-content input[readonly],
+.modal-content input[disabled],
+.modal-content textarea[readonly],
+.modal-content textarea[disabled] {
+  background-color: #1e293b !important;
+  color: #cbd5e1 !important;
+  border-color: #334155 !important;
+  opacity: 1 !important;
+  -webkit-text-fill-color: #cbd5e1 !important;
+  box-shadow: none !important;
+}
+.modal-content input[readonly]::placeholder,
+.modal-content input[disabled]::placeholder {
+  color: #64748b !important;
+  opacity: 1 !important;
+}
+/* Custom thin scrollbar for nav */
+.nav-container::-webkit-scrollbar { width: 4px; }
+.nav-container::-webkit-scrollbar-track { background: transparent; }
+.nav-container::-webkit-scrollbar-thumb { background: rgba(255,255,255,0.05); border-radius: 10px; }
+.nav-container:hover::-webkit-scrollbar-thumb { background: rgba(255,255,255,0.1); }
 </style>
+
+<!-- Backdrop for Mobile -->
+<div class="sidebar-backdrop" id="sidebarBackdrop"></div>
 
 <!-- ===== Sidebar ===== -->
 <aside class="sidebar-dark" id="sidebar">
@@ -189,55 +277,75 @@ main.full { margin-left: 0; }
     </div>
   </div>
 
-  <nav class="nav flex-column" style="margin-top:0.8rem;">
-    <a class="nav-link <?= active('index.php') ?>" href="<?= app_url('index.php') ?>">📅 Үзлэгийн хуваарь</a>
-    <?php if (in_array($role, ['admin', 'reception'])): ?>
-      <a class="nav-link <?= active('bookings.php') ?>" href="<?= app_url('bookings.php') ?>">📋 Захиалгууд</a>
-      <a class="nav-link <?= active('treatments.php') ?>" href="<?= app_url('treatments.php') ?>">🦷 Эмчилгээ</a>
-      <a class="nav-link <?= active('sms_admin.php') ?>" href="<?= app_url('sms_admin.php') ?>">📨 SMS Захиалга</a>
-    <?php endif; ?>
-    <?php if ($role === 'admin'): ?>
-      <a class="nav-link <?= active('reports.php') ?>" href="<?= app_url('reports.php') ?>">📊 Тайлан</a>
-    <?php endif; ?>
-    <?php if ($role === 'reception'): ?>
-      <a class="nav-link <?= active('receptionist.php') ?>" href="<?= app_url('receptionist.php') ?>">🧑‍⚕️ Эмч нэмэх</a>
-    <?php endif; ?>
-    <?php if ($role === 'admin'): ?>
-      <a class="nav-link <?= active('doctors.php') ?>" href="<?= app_url('doctors.php') ?>">🧑‍⚕️ Эмч нар</a>
-      <a class="nav-link <?= active('settings.php') ?>" href="<?= app_url('settings.php') ?>">⚙️ Тохиргоо</a>
-      <hr>
-      <a class="nav-link <?= active('users.php') ?>" href="<?= app_url('users.php') ?>">👥 Хэрэглэгчид</a>
-      <a class="nav-link <?= active('clinics.php') ?>" href="<?= app_url('clinics.php') ?>">🏥 Эмнэлгүүд</a>
-    <?php endif; ?>
-    <?php if ($role === 'doctor'): ?>
-      <a class="nav-link doctor-menu <?= active('my_schedule.php') ?>" href="<?= app_url('my_schedule.php') ?>">
-        <span class="menu-icon" style="background:linear-gradient(135deg,#6366f1,#8b5cf6);">📅</span>
-        Миний хуваарь
-      </a>
-      <a class="nav-link doctor-menu <?= active('my_hours.php') ?>" href="<?= app_url('my_hours.php') ?>">
-        <span class="menu-icon" style="background:linear-gradient(135deg,#10b981,#059669);">⏰</span>
-        Ажиллах цаг
-      </a>
-    <?php endif; ?>
-    <a class="nav-link <?= active('feedback.php') ?>" href="<?= app_url('feedback.php') ?>">💡 Санал хүсэлт</a>
-    <hr>
-  </nav>
+  <div class="nav-container" style="flex:1; overflow-y:auto; margin-bottom:1rem; padding-right:5px;">
+    <nav class="nav flex-column" style="margin-top:0.8rem;">
+      <?php if (in_array($role, ['admin', 'super_admin', 'reception', 'doctor'])): ?>
+        <a class="nav-link <?= active('index.php') ?>" href="<?= app_url('index.php') ?>">📅 Үзлэгийн хуваарь</a>
+        <?php if (in_array($role, ['admin', 'super_admin'])): ?>
+          <a class="nav-link <?= active('dashboard.php') ?>" href="<?= app_url('dashboard.php') ?>">📊 Аналитик тайлан</a>
+        <?php endif; ?>
+        
+        <a class="nav-link <?= active('bookings.php') ?>" href="<?= app_url('bookings.php') ?>">📋 Захиалгууд</a>
+        <a class="nav-link <?= active('patient_history.php') ?>" href="<?= app_url('patient_history.php') ?>">📜 Өвчтөний түүх</a>
+        <a class="nav-link <?= active('inventory.php') ?>" href="<?= app_url('inventory.php') ?>">📦 Материал</a>
+        <a class="nav-link <?= active('treatments.php') ?>" href="<?= app_url('treatments.php') ?>">🦷 Эмчилгээ</a>
+      <?php endif; ?>
 
-  <!-- ===== Profile area (anchored to bottom, above footer) ===== -->
-  <div class="profile-area" style="position:absolute;left:16px;right:16px;bottom:56px;display:flex;flex-direction:column;align-items:center;gap:8px;">
-    <img id="sidebarAvatar" src="https://cdn-icons-png.flaticon.com/512/4140/4140048.png" alt="avatar"
-         style="width:56px;height:56px;border-radius:50%;object-fit:cover;cursor:pointer;border:2px solid rgba(255,255,255,0.06);" onmouseover="this.style.opacity='0.9'" onmouseout="this.style.opacity='1'">
-    <div style="text-align:center;color:#e2e8f0;">
-      <div style="font-weight:700;"><?= htmlspecialchars($name) ?></div>
-      <div style="font-size:0.85rem;color:#9ca3af;"><?= htmlspecialchars($role) ?></div>
-    </div>
-    <button type="button" onclick="openProfileModal()" class="btn btn-sm profile-btn" style="width:100%;background:rgba(255,255,255,0.02);color:#93c5fd;border:1px solid rgba(255,255,255,0.04);border-radius:8px;padding:.45rem .6rem;">Миний профайл</button>
-    <a href="<?= app_url('logout.php') ?>" class="btn btn-sm logout-btn"
-       style="width:100%;margin-top:6px;background:transparent;color:#f87171;border:1px solid rgba(255,255,255,0.03);border-radius:8px;padding:.45rem .6rem;display:inline-flex;align-items:center;justify-content:center;">🚪 Гарах</a>
+      <?php if ($role === 'super_admin'): ?>
+        <a class="nav-link <?= active('sms_messages.php') ?>" href="<?= app_url('sms_messages.php') ?>">💬 Мессежийн тохиргоо</a>
+        <a class="nav-link <?= active('sms_logs.php') ?>" href="<?= app_url('sms_logs.php') ?>">📨 SMS Логийн түүх</a>
+      <?php endif; ?>
+      <?php if ($role === 'reception'): ?>
+        <a class="nav-link <?= active('receptionist.php') ?>" href="<?= app_url('receptionist.php') ?>">🧑‍⚕️ Эмч нэмэх</a>
+      <?php endif; ?>
+      <?php if (in_array($role, ['admin', 'super_admin'])): ?>
+        <a class="nav-link <?= active('doctors.php') ?>" href="<?= app_url('doctors.php') ?>">🧑‍⚕️ Эмч нар</a>
+        <a class="nav-link <?= active('settings.php') ?>" href="<?= app_url('settings.php') ?>">⚙️ Тохиргоо</a>
+      <?php endif; ?>
+      <?php if ($role === 'super_admin'): ?>
+        <hr>
+        <a class="nav-link <?= active('users.php') ?>" href="<?= app_url('users.php') ?>">👥 Хэрэглэгчид</a>
+        <a class="nav-link <?= active('clinics.php') ?>" href="<?= app_url('clinics.php') ?>">🏥 Эмнэлгүүд</a>
+      <?php endif; ?>
+      <?php if ($role === 'doctor'): ?>
+        <a class="nav-link doctor-menu <?= active('my_schedule.php') ?>" href="<?= app_url('my_schedule.php') ?>">
+          <span class="menu-icon" style="background:linear-gradient(135deg,#6366f1,#8b5cf6);">📅</span>
+          Миний хуваарь
+        </a>
+        <a class="nav-link doctor-menu <?= active('my_hours.php') ?>" href="<?= app_url('my_hours.php') ?>">
+          <span class="menu-icon" style="background:linear-gradient(135deg,#10b981,#059669);">⏰</span>
+          Ажиллах цаг
+        </a>
+      <?php endif; ?>
+      <a class="nav-link <?= active('feedback.php') ?>" href="<?= app_url('feedback.php') ?>">💡 Санал хүсэлт</a>
+      <hr>
+    </nav>
   </div>
 
-  <div class="footer">© <?= date('Y') ?> flowlabs</div>
+  <!-- ===== Profile area (static at bottom) ===== -->
+  <div class="profile-area" style="display:flex;flex-direction:column;align-items:center;gap:8px;padding:0.5rem 0;border-top:1px solid rgba(255,255,255,0.05);background:var(--sidebar-bg);">
+    <img id="sidebarAvatar" src="https://cdn-icons-png.flaticon.com/512/4140/4140048.png" alt="avatar"
+         style="width:40px;height:40px;border-radius:50%;object-fit:cover;cursor:pointer;border:2px solid rgba(255,255,255,0.06);" onmouseover="this.style.opacity='0.9'" onmouseout="this.style.opacity='1'">
+    <div style="text-align:center;color:#e2e8f0;margin-bottom:5px;">
+      <div style="font-weight:700;font-size:0.9rem;line-height:1.2;"><?= htmlspecialchars($name) ?></div>
+      <div style="font-size:0.75rem;color:#9ca3af;"><?= htmlspecialchars($role) ?></div>
+    </div>
+    <div style="width:100%;display:flex;flex-direction:column;gap:4px;">
+      <button type="button" onclick="openProfileModal()" class="btn btn-sm profile-btn" style="width:100%;font-size:0.75rem;background:rgba(255,255,255,0.04);color:#93c5fd;border:1px solid rgba(255,255,255,0.06);border-radius:6px;padding:.3rem .5rem;">Миний профайл</button>
+      <a href="<?= app_url('logout.php') ?>" class="btn btn-sm logout-btn"
+         style="width:100%;font-size:0.75rem;background:transparent;color:#f87171;border:1px solid rgba(255,255,255,0.03);border-radius:6px;padding:.3rem .5rem;display:inline-flex;align-items:center;justify-content:center;text-decoration:none;">
+        <i class="fas fa-sign-out-alt me-1"></i>Гарах
+      </a>
+    </div>
+  </div>
+
+  <div class="footer" style="padding-top:10px;font-size:0.75rem;opacity:0.6;">© <?= date('Y') ?> <?= htmlspecialchars($clinicName) ?></div>
 </aside>
+
+<!-- Global Toggle Button for Mobile -->
+<button class="mobile-toggle-btn" id="btnToggleSidebarGlobal" title="Цэс нээх">
+  <i class="fas fa-bars"></i>
+</button>
 
 <!-- ===== Profile Modal (all pages) ===== -->
 <!-- Hidden by default to avoid showing when Bootstrap CSS/JS isn't present -->
@@ -383,15 +491,48 @@ let profileModal = null;
 document.addEventListener('DOMContentLoaded', function () {
   // === Sidebar toggle / dark mode ===
   const sidebar = document.getElementById('sidebar');
-  const main = document.querySelector('main');
+  const main = document.querySelector('main') || document.querySelector('.main-content');
   const btnToggle = document.getElementById('btnToggleSidebar');
+  const btnToggleGlobal = document.getElementById('btnToggleSidebarGlobal');
   const btnDark = document.getElementById('btnDarkMode');
+  const backdrop = document.getElementById('sidebarBackdrop');
   let dark = false;
 
-  if (btnToggle && sidebar) {
-    btnToggle.addEventListener('click', () => {
+  const toggleFn = (e) => {
+    if (e) e.stopPropagation();
+    const isMobile = window.innerWidth < 992;
+    if (isMobile) {
+      sidebar.classList.toggle('open');
+      if (backdrop) backdrop.classList.toggle('show');
+    } else {
       sidebar.classList.toggle('closed');
       if (main) main.classList.toggle('full');
+    }
+  };
+
+  if (sidebar && btnToggle) {
+    btnToggle.addEventListener('click', toggleFn);
+  }
+  if (sidebar && btnToggleGlobal) {
+    btnToggleGlobal.addEventListener('click', toggleFn);
+  }
+
+  if (sidebar && backdrop) {
+    backdrop.addEventListener('click', () => {
+      sidebar.classList.remove('open');
+      backdrop.classList.remove('show');
+    });
+  }
+
+  if (sidebar) {
+    // Auto-close on mobile when clicking a nav link
+    sidebar.querySelectorAll('.nav-link').forEach(link => {
+      link.addEventListener('click', () => {
+        if (window.innerWidth < 992) {
+          sidebar.classList.remove('open');
+          if (backdrop) backdrop.classList.toggle('show', false);
+        }
+      });
     });
   }
 
@@ -702,3 +843,7 @@ window.editPhoneField = editPhoneField;
 window.editPasswordField = editPasswordField;
 window.saveAllProfileChanges = saveAllProfileChanges;
 </script>
+
+<?php
+// Debug output for $clinic and $logoPath
+echo '<!-- DEBUG: clinic=' . htmlspecialchars($clinic) . ' | logoPath=' . htmlspecialchars($logoPath) . ' -->';

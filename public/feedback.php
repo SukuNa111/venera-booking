@@ -4,7 +4,7 @@ require_login();
 
 $user = current_user();
 $role = $user['role'] ?? '';
-$isAdmin = $role === 'admin';
+$isAdmin = in_array($role, ['admin', 'super_admin']);
 
 $success = '';
 $error = '';

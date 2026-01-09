@@ -92,15 +92,6 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action']) && $_POST['
             }
             $st = db()->prepare("UPDATE users SET name = ? WHERE id = ?");
             $st->execute([$name, $u['id']]);
-            // Sync doctors table name for doctor users so calendar shows updated name
-            if (($u['role'] ?? '') === 'doctor') {
-              try {
-                $st2 = db()->prepare("UPDATE doctors SET name = ? WHERE id = ?");
-                $st2->execute([$name, $u['id']]);
-              } catch (Exception $e) {
-                // ignore
-              }
-            }
             echo json_encode(['ok' => true, 'msg' => 'Нэр шинэчлэгдлээ']);
             exit;
         }
@@ -153,11 +144,11 @@ $clinic_id = $u['clinic_id'] ?? 'venera';
 // Fetch all doctors for this clinic
 $allDoctors = [];
 try {
-    $st = db()->prepare("SELECT id, name, active, specialty, department FROM doctors WHERE clinic = ? ORDER BY name");
-    $st->execute([$clinic_id]);
-    $allDoctors = $st->fetchAll(PDO::FETCH_ASSOC);
+  $st = db()->prepare("SELECT id, name, active, specialty, department FROM users WHERE role='doctor' AND clinic_id = ? ORDER BY name");
+  $st->execute([$clinic_id]);
+  $allDoctors = $st->fetchAll(PDO::FETCH_ASSOC);
 } catch (Exception $ex) {
-    $allDoctors = [];
+  $allDoctors = [];
 }
 
 
@@ -172,15 +163,15 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && $_SERVER['CONTENT_TYPE'] === 'appli
         $active = (int)($data['active'] ?? 1);
         
         if ($doctor_id > 0) {
-            try {
-                $st = db()->prepare("UPDATE doctors SET active = ? WHERE id = ?");
-                $st->execute([$active, $doctor_id]);
-                echo json_encode(['ok' => true, 'msg' => 'Эмчийн статус өөрчлөгдлөө']);
-            } catch (Exception $e) {
-                echo json_encode(['ok' => false, 'msg' => 'Алдаа: ' . $e->getMessage()]);
-            }
+          try {
+            $st = db()->prepare("UPDATE users SET active = ? WHERE id = ? AND role='doctor'");
+            $st->execute([$active, $doctor_id]);
+            echo json_encode(['ok' => true, 'msg' => 'Эмчийн статус өөрчлөгдлөө']);
+          } catch (Exception $e) {
+            echo json_encode(['ok' => false, 'msg' => 'Алдаа: ' . $e->getMessage()]);
+          }
         } else {
-            echo json_encode(['ok' => false, 'msg' => 'Эмч олдсонгүй']);
+          echo json_encode(['ok' => false, 'msg' => 'Эмч олдсонгүй']);
         }
         exit;
     }
@@ -192,15 +183,15 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && $_SERVER['CONTENT_TYPE'] === 'appli
         $department = trim($data['department'] ?? 'nonsurgical');
         
         if ($doctor_id > 0 && $name) {
-            try {
-                $st = db()->prepare("UPDATE doctors SET name = ?, specialty = ?, department = ? WHERE id = ? AND clinic = ?");
-                $st->execute([$name, $specialty, $department, $doctor_id, $clinic_id]);
-                echo json_encode(['ok' => true, 'msg' => 'Эмчийн мэдээлэл шинэчлэгдлөө']);
-            } catch (Exception $e) {
-                echo json_encode(['ok' => false, 'msg' => 'Алдаа: ' . $e->getMessage()]);
-            }
+          try {
+            $st = db()->prepare("UPDATE users SET name = ?, specialty = ?, department = ?, clinic_id = ? WHERE id = ? AND role='doctor'");
+            $st->execute([$name, $specialty, $department, $clinic_id, $doctor_id]);
+            echo json_encode(['ok' => true, 'msg' => 'Эмчийн мэдээлэл шинэчлэгдлөө']);
+          } catch (Exception $e) {
+            echo json_encode(['ok' => false, 'msg' => 'Алдаа: ' . $e->getMessage()]);
+          }
         } else {
-            echo json_encode(['ok' => false, 'msg' => 'Эмчийн ID болон нэр шаардлагатай']);
+          echo json_encode(['ok' => false, 'msg' => 'Эмчийн ID болон нэр шаардлагатай']);
         }
         exit;
     }
@@ -216,39 +207,11 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && $_SERVER['CONTENT_TYPE'] === 'appli
         
         if ($name && $phone && $pin) {
             try {
-                // Insert new doctor
-                $st = db()->prepare("
-                    INSERT INTO doctors (name, clinic, specialty, department, color, active)
-                    VALUES (?, ?, ?, ?, ?, 1)
-                ");
-                $st->execute([$name, $clinic, $specialty, $department, $color]);
-                $doctor_id = db()->lastInsertId();
-                
-                // Create default working hours (09:00-18:00, available) for all days
-                for ($i = 0; $i < 7; $i++) {
-                    $stWh = db()->prepare("INSERT INTO working_hours (doctor_id, day_of_week, start_time, end_time, is_available) VALUES (?, ?, ?, ?, 1)");
-                    $stWh->execute([$doctor_id, $i, '09:00', '18:00']);
-                }
-                
-                // Create user record for this doctor with provided phone and PIN
-                $pin_hash = password_hash($pin, PASSWORD_DEFAULT);
-                try {
-                    $stUser = db()->prepare("INSERT INTO users (id, name, phone, pin_hash, role, clinic_id) VALUES (?, ?, ?, ?, 'doctor', ?)");
-                    $stUser->execute([$doctor_id, $name, $phone, $pin_hash, $clinic]);
-                    error_log("✅ User created: $doctor_id, $name, $phone");
-                } catch (Exception $e) {
-                    error_log("❌ User creation failed: " . $e->getMessage());
-                    // If duplicate phone error
-                    if (strpos($e->getMessage(), 'Duplicate entry') !== false && strpos($e->getMessage(), 'phone') !== false) {
-                        echo json_encode(['ok' => false, 'msg' => 'Утасны дугаар давхцаж байна. Өөр дугаар оруулна уу.']);
-                        exit;
-                    } else {
-                        echo json_encode(['ok' => false, 'msg' => 'User бүртгэхэд алдаа: ' . $e->getMessage()]);
-                        exit;
-                    }
-                }
-                
-                echo json_encode(['ok' => true, 'msg' => "Эмч '{$name}' нэмэгдлээ", 'id' => $doctor_id]);
+            $pin_hash = password_hash($pin, PASSWORD_DEFAULT);
+            $stUser = db()->prepare("INSERT INTO users (name, phone, pin_hash, role, clinic_id, department, specialty, color, show_in_calendar, active, created_at) VALUES (?, ?, ?, 'doctor', ?, ?, ?, ?, 1, 1, NOW())");
+            $stUser->execute([$name, $phone, $pin_hash, $clinic, $department, $specialty, $color]);
+            $doctor_id = db()->lastInsertId();
+            echo json_encode(['ok' => true, 'msg' => "Эмч '{$name}' нэмэгдлээ", 'id' => $doctor_id]);
             } catch (Exception $e) {
                 echo json_encode(['ok' => false, 'msg' => 'Алдаа: ' . $e->getMessage()]);
             }
@@ -978,12 +941,12 @@ foreach ($allDoctors as $doc) {
           <div class="mb-3">
             <label class="form-label">Тасаг</label>
             <select name="department" class="form-select" id="editDoctorDept">
-              <option value="general_surgery">Мэс / ерөнхий</option>
-              <option value="face_surgery">Мэс / нүүр</option>
-              <option value="nose_surgery">Мэс / хамар</option>
-              <option value="oral_surgery">Мэс / амны</option>
-              <option value="hair_clinic">Үс</option>
+              <option value="">-- Сонгох --</option>
+              <option value="surgery">Мэс засал</option>
               <option value="non_surgical">Мэсийн бус</option>
+              <option value="traditional">Уламжлалт</option>
+              <option value="dental">Шүд</option>
+              <option value="infusion">Дусал</option>
             </select>
           </div>
         </form>
@@ -1033,12 +996,12 @@ foreach ($allDoctors as $doc) {
           <div class="mb-3">
             <label class="form-label">Тасаг</label>
             <select name="department" class="form-select">
-              <option value="general_surgery">Мэс / ерөнхий</option>
-              <option value="face_surgery">Мэс / нүүр</option>
-              <option value="nose_surgery">Мэс / хамар</option>
-              <option value="oral_surgery">Мэс / амны</option>
-              <option value="hair_clinic">Үс</option>
+              <option value="">-- Сонгох --</option>
+              <option value="surgery">Мэс засал</option>
               <option value="non_surgical" selected>Мэсийн бус</option>
+              <option value="traditional">Уламжлалт</option>
+              <option value="dental">Шүд</option>
+              <option value="infusion">Дусал</option>
             </select>
           </div>
           <div class="mb-3">

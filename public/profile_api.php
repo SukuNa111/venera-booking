@@ -104,15 +104,6 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action']) && $_POST['
             }
             $st = db()->prepare("UPDATE users SET name = ? WHERE id = ?");
             $st->execute([$name, $u['id']]);
-            // If this user is a doctor, also sync the doctors table name by id
-            if (($u['role'] ?? '') === 'doctor') {
-                try {
-                    $st2 = db()->prepare("UPDATE doctors SET name = ? WHERE id = ?");
-                    $st2->execute([$name, $u['id']]);
-                } catch (Exception $e) {
-                    // ignore doctor table update errors
-                }
-            }
             echo json_encode(['ok' => true, 'msg' => 'Нэр шинэчлэгдлээ'], JSON_UNESCAPED_UNICODE);
             exit;
         }

@@ -4,7 +4,7 @@ require_login();
 
 $user = current_user();
 $role = $user['role'] ?? 'guest';
-$isAdmin = ($role === 'admin');
+$isAdmin = ($role === 'admin' || $role === 'super_admin');
 $isDoctor = ($role === 'doctor');
 
 if (!$isAdmin && !$isDoctor) {
@@ -783,6 +783,8 @@ input:checked + .toggle-slider:before {
         </div>
       </form>
     </div>
+
+    </div>
   </div>
   
   <div class="col-lg-4">
@@ -880,32 +882,9 @@ input:checked + .toggle-slider:before {
 
 </main>
 
+
 <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"></script>
 <script>
-// Add some interactive elements
-document.addEventListener('DOMContentLoaded', function() {
-  // Color preview update
-  const colorInputs = document.querySelectorAll('input[type="color"]');
-  colorInputs.forEach(input => {
-    input.addEventListener('input', function() {
-      const preview = this.parentElement.querySelector('.color-preview');
-      if (preview) {
-        preview.style.backgroundColor = this.value;
-      }
-    });
-  });
-  
-  // Add animation to stat cards
-  document.querySelectorAll('.stat-card').forEach((card, index) => {
-    card.style.opacity = '0';
-    card.style.transform = 'translateY(20px)';
-    card.style.transition = 'opacity 0.5s ease, transform 0.5s ease';
-    
-    setTimeout(() => {
-      card.style.opacity = '1';
-      card.style.transform = 'translateY(0)';
-    }, 100 * (index + 1));
-  });
 });
 </script>
 </body>

@@ -5,11 +5,22 @@ require_role(['admin', 'reception']);
 // Get current user and clinic
 $currentUser = current_user();
 $clinic = $currentUser['clinic_id'] ?? $_SESSION['clinic_id'] ?? 'venera';
+$userRole = $currentUser['role'] ?? '';
+$userDept = $currentUser['department'] ?? '';
 
 // If clinic is 'all', default to first available clinic
-if ($clinic === 'all') {
-    $firstClinic = db()->query("SELECT code FROM clinics WHERE active=1 ORDER BY name LIMIT 1")->fetchColumn();
-    $clinic = $firstClinic ?: 'venera';
+$allClinics = db()->query("SELECT code, name FROM clinics WHERE active=1 ORDER BY name")->fetchAll();
+$clinicMap = [];
+foreach ($allClinics as $ac) {
+    $clinicMap[$ac['code']] = $ac['name'];
+}
+
+$userClinicRaw = $currentUser['clinic_id'] ?? 'venera';
+$isSuperAdmin = $userRole === 'super_admin';
+$canSeeAll = $isSuperAdmin || ($userRole === 'admin' && $userClinicRaw === 'all');
+
+if ($clinic === 'all' && !empty($allClinics)) {
+    $clinic = $allClinics[0]['code'];
 }
 
 // sendSMS is provided by config.php (uses Skytel if configured, otherwise logs to sms_log)
@@ -32,6 +43,7 @@ if (file_exists($settingsPath)) {
   }
 }
 
+
 // --- POST үйлдэл (JSON) ---
 if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     header('Content-Type: application/json; charset=utf-8');
@@ -53,7 +65,6 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
   $visit_count = (int)($inputData['visit_count'] ?? 1);
   $note = trim($inputData['note'] ?? '');
 
-        // doctor_id сонголтоор - 0 байж болно
         if ($patient_name && $phone && $date && $start_time && $end_time && $service_name) {
             try {
         $visit_count = max(1, $visit_count);
@@ -72,7 +83,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
           $date,
           $start_time,
           $end_time,
-          $doctor_id > 0 ? $doctor_id : null,
+          $doctor_id,
           $clinic,
           $status,
           $gender,
@@ -84,37 +95,81 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         // Get the last inserted ID for SMS logging
         $booking_id = (int)db()->lastInsertId();
         
-        // Send SMS confirmation - ALWAYS send, regardless of sendReminders setting
-        $smsMessage = "Та {$patient_name}-ийн \"{$service_name}\" үйлчилгээ {$date} {$start_time}-д захиалсан. Баталгаажлаа. {$clinicName}";
+        // Send SMS confirmation using template
+        $template = '';
+        $isLatin = 1;
+        $templateClinicName = '';
+        $templateClinicPhone = '';
+        try {
+            // Try to get clinic-specific confirmation template first
+            $tst = db()->prepare("SELECT message, is_latin, clinic_name, clinic_phone FROM sms_templates WHERE type='confirmation' AND clinic = ? LIMIT 1");
+            $tst->execute([$clinic]);
+            $trow = $tst->fetch(PDO::FETCH_ASSOC);
+            if ($trow) {
+                $template = $trow['message'];
+                $isLatin = (int)$trow['is_latin'];
+                $templateClinicName = $trow['clinic_name'] ?? '';
+                $templateClinicPhone = $trow['clinic_phone'] ?? '';
+            }
+        } catch(Exception $e){}
+
+        if (!$template) {
+            // Fallback to default confirmation message
+            $template = 'Sain baina uu! Tany tsag {clinic_name}-d {date} {start_time}-d batalgaajlaa. Lawlah utas: {phone}.';
+        }
+
+        // Clinic Name Resolution
+        $smsClinicName = $templateClinicName ?: ($clinicMap[$clinic] ?? $clinicName);
+        
+        // Smart Phone Routing
+        $defaultPhone = $templateClinicPhone ?: '70115090';
+        $deptPhone = getPhoneForDepartment($booking_id, $clinic, $defaultPhone);
+
+        $vars = [
+            'patient_name' => $patient_name,
+            'date' => date('m-d', strtotime($date)),
+            'start_time' => substr($start_time, 0, 5),
+            'clinic_name' => $smsClinicName,
+            'phone' => $deptPhone,
+            'service_name' => $service_name
+        ];
+        
+        $smsMessage = render_template($template, $vars);
+        
+        if ($isLatin) {
+            $smsMessage = to_latin($smsMessage);
+        }
         $smsResult = sendSMS($phone, $smsMessage, $booking_id);
         
+        // --- Proactive SMS Scheduling ---
+        syncScheduledSMS($booking_id);
+
         echo json_encode(['ok' => true, 'msg' => 'Захиалга амжилттай нэмэгдлээ', 'sms' => $smsResult]);
-            } catch (Exception $e) {
-                echo json_encode(['ok' => false, 'msg' => $e->getMessage()]);
-            }
-        } else {
-            echo json_encode(['ok' => false, 'msg' => 'Нэр, утас, огноо, цаг оруулна уу']);
-        }
-        exit;
+      } catch (Exception $e) {
+        echo json_encode(['ok' => false, 'msg' => $e->getMessage()]);
+      }
+    } else {
+      echo json_encode(['ok' => false, 'msg' => 'Нэр, утас, огноо, цаг, эмч оруулна уу']);
     }
+    exit;
+  }
 
-    if ($action === 'update') {
-  $id = (int)($inputData['id'] ?? 0);
-  $patient_name = trim($inputData['patient_name'] ?? '');
-  $phone = trim($inputData['phone'] ?? '');
-  $date = trim($inputData['date'] ?? '');
-  $start_time = trim($inputData['start_time'] ?? '');
-  $end_time = trim($inputData['end_time'] ?? '');
-  $doctor_id = (int)($inputData['doctor_id'] ?? 0);
-  $status = $inputData['status'] ?? 'pending';
-  $gender = trim($inputData['gender'] ?? '');
-  $service_name = trim($inputData['service_name'] ?? '');
-  $visit_count = (int)($inputData['visit_count'] ?? 1);
-  $note = trim($inputData['note'] ?? '');
+  if ($action === 'update') {
+    $id = (int)($inputData['id'] ?? 0);
+    $patient_name = trim($inputData['patient_name'] ?? '');
+    $phone = trim($inputData['phone'] ?? '');
+    $date = trim($inputData['date'] ?? '');
+    $start_time = trim($inputData['start_time'] ?? '');
+    $end_time = trim($inputData['end_time'] ?? '');
+    $doctor_id = (int)($inputData['doctor_id'] ?? 0);
+    $status = $inputData['status'] ?? 'pending';
+    $gender = trim($inputData['gender'] ?? '');
+    $service_name = trim($inputData['service_name'] ?? '');
+    $visit_count = (int)($inputData['visit_count'] ?? 1);
+    $note = trim($inputData['note'] ?? '');
 
-        // doctor_id сонголтоор - 0 байж болно
-        if ($id && $patient_name && $phone && $date && $start_time && $end_time && $service_name) {
-            try {
+    if ($id && $patient_name && $phone && $date && $start_time && $end_time && $service_name) {
+      try {
         $visit_count = max(1, $visit_count);
         $normalizedPhone = preg_replace('/\D+/', '', $phone);
         if ($normalizedPhone !== '') {
@@ -126,22 +181,38 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             $visit_count = 1;
           }
         }
-                $st = db()->prepare("UPDATE bookings SET patient_name=?, phone=?, date=?, start_time=?, end_time=?, doctor_id=?, status=?, gender=?, service_name=?, visit_count=?, note=? WHERE id=?");
-                $st->execute([$patient_name, $phone, $date, $start_time, $end_time, $doctor_id > 0 ? $doctor_id : null, $status, $gender, $service_name, $visit_count, $note, $id]);
-                
-                // Send update notification SMS
-                $smsMessage = "Та {$patient_name}-ийн \"{$service_name}\" үйлчилгээний захиалга {$date} {$start_time}-д шинэчлэгдлээ. {$clinicName}";
-                $smsResult = sendSMS($phone, $smsMessage, $id);
-                
-                echo json_encode(['ok' => true, 'msg' => 'Захиалга амжилттай засагдлаа', 'sms' => $smsResult]);
-            } catch (Exception $e) {
-                echo json_encode(['ok' => false, 'msg' => $e->getMessage()]);
-            }
-        } else {
-            echo json_encode(['ok' => false, 'msg' => 'Аль нэг талбар алга']);
+
+        // --- Audit log: хуучин статус авах ---
+        $oldStatus = null;
+        $stOld = db()->prepare("SELECT status FROM bookings WHERE id=?");
+        $stOld->execute([$id]);
+        $oldStatus = $stOld->fetchColumn();
+
+        $st = db()->prepare("UPDATE bookings SET patient_name=?, phone=?, date=?, start_time=?, end_time=?, doctor_id=?, status=?, gender=?, service_name=?, visit_count=?, note=? WHERE id=?");
+        $st->execute([$patient_name, $phone, $date, $start_time, $end_time, $doctor_id, $status, $gender, $service_name, $visit_count, $note, $id]);
+
+        // --- Audit log: статус өөрчлөгдвөл хадгалах ---
+        if ($oldStatus !== null && $oldStatus !== $status) {
+          try {
+            $audit = db()->prepare("INSERT INTO booking_status_audit (booking_id, old_status, new_status, changed_by) VALUES (?, ?, ?, ?)");
+            $audit->execute([$id, $oldStatus, $status, $currentUser['id']]);
+          } catch (Exception $auditEx) {
+            // booking_status_audit table байхгүй бол үгүйлэхгүй
+          }
         }
-        exit;
+
+        // --- Proactive SMS Scheduling ---
+        syncScheduledSMS($id);
+
+        echo json_encode(['ok' => true, 'msg' => 'Захиалга амжилттай засагдлаа']);
+      } catch (Exception $e) {
+        echo json_encode(['ok' => false, 'msg' => $e->getMessage()]);
+      }
+    } else {
+      echo json_encode(['ok' => false, 'msg' => 'Нэр, утас, огноо, цаг, эмч оруулна уу']);
     }
+    exit;
+  }
 
     if ($action === 'delete') {
         $id = (int)($inputData['id'] ?? 0);
@@ -162,67 +233,125 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
 }
 
 // --- GET захиалгууд ---
-// If admin user has 'all' clinics, show all bookings
-$userClinicRaw = $currentUser['clinic_id'] ?? 'venera';
-if ($userClinicRaw === 'all') {
-    $st = db()->query("
+// Reception users with department: automatically filter by their department
+$deptFilter = $userRole === 'reception' && !empty($userDept) ? $userDept : (trim($_GET['department'] ?? '') ?: null);
+$selClinic = trim($_GET['clinic'] ?? '');
+
+// If admin user has 'all' clinics, show all bookings (optionally filtered by clinic); otherwise scope by clinic + department
+// Standard view scope
+if ($canSeeAll) {
+    $whereParts = [];
+    $params = [];
+    
+    if ($deptFilter) {
+      $whereParts[] = "(COALESCE(u.department,'') = CAST(? AS text) OR b.doctor_id IS NULL)";
+      $params[] = $deptFilter;
+    }
+    
+    if ($selClinic !== '') {
+      $whereParts[] = "b.clinic = ?";
+      $params[] = $selClinic;
+    }
+    
+    $whereStr = $whereParts ? "WHERE " . implode(" AND ", $whereParts) : "";
+    
+    $sql = "
       SELECT 
         b.*, 
-        d.name AS doctor_name, 
-        d.color AS doctor_color 
+        u.name AS doctor_name, 
+        COALESCE(NULLIF(u.color,''),'#0d6efd') AS doctor_color 
       FROM bookings b 
-      LEFT JOIN doctors d ON d.id = b.doctor_id 
+      LEFT JOIN users u ON u.id = b.doctor_id AND u.role='doctor'
+      $whereStr
       ORDER BY b.date DESC, b.start_time DESC
-    ");
+    ";
+    
+    $st = db()->prepare($sql);
+    $st->execute($params);
     $rows = $st->fetchAll();
 } else {
-    $st = db()->prepare("
-      SELECT 
-        b.*, 
-        d.name AS doctor_name, 
-        d.color AS doctor_color 
-      FROM bookings b 
-      LEFT JOIN doctors d ON d.id = b.doctor_id 
-      WHERE b.clinic = ? 
-      ORDER BY b.date DESC, b.start_time DESC
-    ");
-    $st->execute([$clinic]);
+    // Standard filtered view for non-admin or restricted admin
+    if ($deptFilter) {
+      $st = db()->prepare("
+        SELECT 
+          b.*, 
+          u.name AS doctor_name, 
+          COALESCE(NULLIF(u.color,''),'#0d6efd') AS doctor_color 
+        FROM bookings b 
+        LEFT JOIN users u ON u.id = b.doctor_id AND u.role='doctor'
+        WHERE b.clinic = ? AND (COALESCE(u.department,'') = CAST(? AS text) OR b.doctor_id IS NULL)
+        ORDER BY b.date DESC, b.start_time DESC
+      ");
+      $st->execute([$clinic, $deptFilter]);
+    } else {
+      $st = db()->prepare("
+        SELECT 
+          b.*, 
+          u.name AS doctor_name, 
+          COALESCE(NULLIF(u.color,''),'#0d6efd') AS doctor_color 
+        FROM bookings b 
+        LEFT JOIN users u ON u.id = b.doctor_id AND u.role='doctor'
+        WHERE b.clinic = ?
+        ORDER BY b.date DESC, b.start_time DESC
+      ");
+      $st->execute([$clinic]);
+    }
     $rows = $st->fetchAll();
 }
 
 // --- Эмчид жагсаалт ---
-$st = db()->prepare("SELECT * FROM doctors WHERE clinic = ? AND active = 1 ORDER BY name");
-$st->execute([$clinic]);
+if ($canSeeAll) {
+    if ($deptFilter) {
+      $st = db()->prepare("SELECT id, name, color, department, specialty, clinic_id FROM users WHERE role='doctor' AND active = 1 AND department = ? ORDER BY name");
+      $st->execute([$deptFilter]);
+    } else {
+      $st = db()->prepare("SELECT id, name, color, department, specialty, clinic_id FROM users WHERE role='doctor' AND active = 1 ORDER BY name");
+      $st->execute();
+    }
+} else {
+    if ($deptFilter) {
+      $st = db()->prepare("SELECT id, name, color, department, specialty, clinic_id FROM users WHERE role='doctor' AND active = 1 AND clinic_id = ? AND department = ? ORDER BY name");
+      $st->execute([$clinic, $deptFilter]);
+    } else {
+      $st = db()->prepare("SELECT id, name, color, department, specialty, clinic_id FROM users WHERE role='doctor' AND active = 1 AND clinic_id = ? ORDER BY name");
+      $st->execute([$clinic]);
+    }
+}
 $doctors = $st->fetchAll();
 
-// If no doctors found for this clinic, get all active doctors
-if (empty($doctors)) {
-    $st = db()->query("SELECT * FROM doctors WHERE active = 1 ORDER BY name");
-    $doctors = $st->fetchAll();
+// --- Статусын тооцоо ---
+$wherePartsS = [];
+$paramsS = [];
+if ($canSeeAll) {
+    if ($deptFilter) {
+        $wherePartsS[] = "(COALESCE(u.department,'') = CAST(? AS text) OR b.doctor_id IS NULL)";
+        $paramsS[] = $deptFilter;
+    }
+    if ($selClinic !== '') {
+        $wherePartsS[] = "b.clinic = ?";
+        $paramsS[] = $selClinic;
+    }
+} else {
+    $wherePartsS[] = "b.clinic = ?";
+    $paramsS[] = $clinic;
+    if ($deptFilter) {
+        $wherePartsS[] = "(COALESCE(u.department,'') = CAST(? AS text) OR b.doctor_id IS NULL)";
+        $paramsS[] = $deptFilter;
+    }
 }
 
-// --- Статусын тооцоо ---
-if ($userClinicRaw === 'all') {
-    $statusCounts = db()->query("
-      SELECT 
-        SUM(CASE WHEN status='online' THEN 1 ELSE 0 END) AS online_count,
-        SUM(CASE WHEN status='arrived' THEN 1 ELSE 0 END) AS arrived_count,
-        SUM(CASE WHEN status='pending' THEN 1 ELSE 0 END) AS pending_count,
-        SUM(CASE WHEN status='cancelled' THEN 1 ELSE 0 END) AS cancelled_count
-      FROM bookings
-    ");
-} else {
-    $statusCounts = db()->prepare("
-      SELECT 
-        SUM(CASE WHEN status='online' THEN 1 ELSE 0 END) AS online_count,
-        SUM(CASE WHEN status='arrived' THEN 1 ELSE 0 END) AS arrived_count,
-        SUM(CASE WHEN status='pending' THEN 1 ELSE 0 END) AS pending_count,
-        SUM(CASE WHEN status='cancelled' THEN 1 ELSE 0 END) AS cancelled_count
-      FROM bookings
-      WHERE clinic = ?
-    ");
-    $statusCounts->execute([$clinic]);
-}
+$whereStrS = $wherePartsS ? "WHERE " . implode(" AND ", $wherePartsS) : "";
+$statusCounts = db()->prepare("
+    SELECT 
+      SUM(CASE WHEN b.status='online' THEN 1 ELSE 0 END) AS online_count,
+      SUM(CASE WHEN b.status='arrived' THEN 1 ELSE 0 END) AS arrived_count,
+      SUM(CASE WHEN b.status='pending' THEN 1 ELSE 0 END) AS pending_count,
+      SUM(CASE WHEN b.status='cancelled' THEN 1 ELSE 0 END) AS cancelled_count
+    FROM bookings b
+    LEFT JOIN users u ON u.id = b.doctor_id AND u.role='doctor'
+    $whereStrS
+");
+$statusCounts->execute($paramsS);
 $statuses = $statusCounts->fetch(PDO::FETCH_ASSOC);
 $onlineCount = $statuses['online_count'] ?? 0;
 $arrivedCount = $statuses['arrived_count'] ?? 0;
@@ -232,12 +361,12 @@ $cancelledCount = $statuses['cancelled_count'] ?? 0;
 <!doctype html>
 <html lang="mn">
 <head>
-  <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width,initial-scale=1">
-  <title>📋 Захиалгууд — Venera-Dent</title>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Захиалгууд</title>
   <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css" rel="stylesheet">
   <link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css" rel="stylesheet">
-  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&display=swap" rel="stylesheet">
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
   <style>
   :root {
     --primary: #6366f1;
@@ -475,6 +604,18 @@ $cancelledCount = $statuses['cancelled_count'] ?? 0;
     box-shadow: 0 4px 12px rgba(239, 68, 68, 0.3);
   }
   
+  .status-doctor-cancelled {
+    background: linear-gradient(135deg, #06b6d4 0%, #0891b2 100%);
+    color: white;
+    box-shadow: 0 4px 12px rgba(6, 182, 212, 0.3);
+  }
+  
+  .status-client-cancelled {
+    background: linear-gradient(135deg, #1e293b 0%, #0f172a 100%);
+    color: white;
+    box-shadow: 0 4px 12px rgba(15, 23, 42, 0.3);
+  }
+  
   /* Service Badge */
   .service-badge {
     background: linear-gradient(135deg, #e0e7ff 0%, #c7d2fe 100%);
@@ -670,6 +811,24 @@ $cancelledCount = $statuses['cancelled_count'] ?? 0;
     animation: fadeInUp 0.5s ease forwards;
   }
   
+  /* Profile modal dark readonly/disabled fix (stronger override) */
+  .modal-content input[readonly],
+  .modal-content input[disabled],
+  .modal-content textarea[readonly],
+  .modal-content textarea[disabled] {
+    background-color: #1e293b !important;
+    color: #cbd5e1 !important;
+    border-color: #334155 !important;
+    opacity: 1 !important;
+    -webkit-text-fill-color: #cbd5e1 !important;
+    box-shadow: none !important;
+  }
+  .modal-content input[readonly]::placeholder,
+  .modal-content input[disabled]::placeholder {
+    color: #64748b !important;
+    opacity: 1 !important;
+  }
+  
   /* Responsive */
   @media (max-width: 768px) {
     main {
@@ -685,7 +844,48 @@ $cancelledCount = $statuses['cancelled_count'] ?? 0;
       grid-template-columns: repeat(2, 1fr);
     }
   }
-  </style>
+    /* Mobile Responsiveness */
+  @media (max-width: 991.98px) {
+    main { 
+      /* Margin and padding handled globally by sidebar.php */
+      margin-bottom: 2rem;
+    }
+    .page-header {
+      padding: 1.25rem;
+      border-radius: 16px;
+      margin-bottom: 1rem;
+    }
+    .page-header h2 {
+      font-size: 1.5rem;
+    }
+    .stats-row {
+      grid-template-columns: repeat(2, 1fr);
+      gap: 0.75rem;
+    }
+    .stat-card {
+      padding: 1rem;
+    }
+    .stat-label {
+      font-size: 0.75rem;
+    }
+    .stat-value {
+      font-size: 1.25rem;
+    }
+    .filters-grid {
+      grid-template-columns: 1fr !important;
+    }
+  }
+  
+  @media (max-width: 575.98px) {
+    .stats-row {
+      grid-template-columns: 1fr;
+    }
+    .btn-add-booking {
+      width: 100%;
+      justify-content: center;
+    }
+  }
+</style>
 </head>
 <body>
   <?php include __DIR__ . '/../partials/sidebar.php'; ?>
@@ -701,10 +901,7 @@ $cancelledCount = $statuses['cancelled_count'] ?? 0;
             Нийт <strong><?= count($rows) ?></strong> захиалга · <strong><?= count($doctors) ?></strong> эмч
           </p>
         </div>
-        <button id="addBtn" class="btn-add">
-          <i class="fas fa-plus-circle"></i>
-          Шинэ захиалга
-        </button>
+        <!-- Шинэ захиалга товчийг хассан -->
       </div>
     </div>
 
@@ -747,7 +944,7 @@ $cancelledCount = $statuses['cancelled_count'] ?? 0;
           <label class="form-label fw-semibold text-muted small">
             <i class="fas fa-search me-1"></i>Өвчтөн хайх
           </label>
-          <input type="text" id="filterPatient" class="form-control" placeholder="Нэр эсвэл үйлчилгээ...">
+          <input type="text" id="filterPatient" class="form-control" placeholder="Нэр, үйлчилгээ, утас эсвэл эмч...">
         </div>
         <div class="col-lg-2 col-md-6">
           <label class="form-label fw-semibold text-muted small">
@@ -764,8 +961,8 @@ $cancelledCount = $statuses['cancelled_count'] ?? 0;
             <option value="pending">Хүлээгдэж буй</option>
             <option value="online">Онлайн</option>
             <option value="arrived">Ирсэн</option>
-            <option value="paid">Төлөгдсөн</option>
-            <option value="cancelled">Цуцалсан</option>
+            <option value="cancelled">Үйлчлүүлэгч цуцалсан</option>
+            <option value="doctor_cancelled">Эмч цуцалсан</option>
           </select>
         </div>
         <div class="col-lg-2 col-md-6">
@@ -779,9 +976,31 @@ $cancelledCount = $statuses['cancelled_count'] ?? 0;
             <?php endforeach; ?>
           </select>
         </div>
-        <div class="col-lg-3 col-md-12">
-          <button id="clearFilter" class="btn btn-clear w-100">
-            <i class="fas fa-redo me-2"></i>Цэвэрлэх
+        <?php if ($canSeeAll): ?>
+        <div class="col-lg-2 col-md-6">
+          <label class="form-label fw-semibold text-muted small">
+            <i class="fas fa-hospital me-1"></i>Эмнэлэг
+          </label>
+          <select id="filterClinic" class="form-select">
+            <option value="">Бүх эмнэлэг</option>
+            <?php foreach ($allClinics as $ac): ?>
+              <option value="<?= $ac['code'] ?>" <?= $selClinic === $ac['code'] ? 'selected' : '' ?>><?= htmlspecialchars($ac['name']) ?></option>
+            <?php endforeach; ?>
+          </select>
+        </div>
+        <?php else: ?>
+        <div class="col-lg-2 col-md-6">
+          <label class="form-label fw-semibold text-muted small">
+            <i class="fas fa-hospital me-1"></i>Эмнэлэг
+          </label>
+          <div class="form-control bg-light border-0 fw-bold" style="padding: 0.75rem 1rem; border-radius: 12px; font-size: 0.95rem;">
+            <?= htmlspecialchars($clinicMap[$clinic] ?? 'Венера') ?>
+          </div>
+        </div>
+        <?php endif; ?>
+        <div class="col-lg-1 col-md-12">
+          <button id="clearFilter" class="btn btn-clear w-100 p-2">
+            <i class="fas fa-redo"></i>
           </button>
         </div>
       </div>
@@ -796,6 +1015,7 @@ $cancelledCount = $statuses['cancelled_count'] ?? 0;
               <th>#</th>
               <th>Огноо</th>
               <th>Эмч</th>
+              <?php if ($canSeeAll): ?><th>Эмнэлэг</th><?php endif; ?>
               <th>Цаг</th>
               <th>Өвчтөн</th>
               <th>Үйлчилгээ</th>
@@ -821,8 +1041,11 @@ $cancelledCount = $statuses['cancelled_count'] ?? 0;
                   data-date="<?= htmlspecialchars($r['date']) ?>" 
                   data-status="<?= htmlspecialchars($r['status']) ?>" 
                   data-doctor="<?= $r['doctor_id'] ?>" 
+                  data-clinic="<?= htmlspecialchars($r['clinic']) ?>"
+                  data-doctor-name="<?= htmlspecialchars(mb_strtolower($r['doctor_name'] ?? '')) ?>"
                   data-patient="<?= htmlspecialchars(mb_strtolower($r['patient_name'])) ?>" 
-                  data-service="<?= htmlspecialchars(mb_strtolower($r['service_name'] ?? '')) ?>">
+                  data-service="<?= htmlspecialchars(mb_strtolower($r['service_name'] ?? '')) ?>"
+                  data-phone="<?= htmlspecialchars($r['phone']) ?>">
                   <td><strong><?= $i+1 ?></strong></td>
                   <td>
                     <span class="date-badge"><?= htmlspecialchars($r['date']) ?></span>
@@ -833,11 +1056,20 @@ $cancelledCount = $statuses['cancelled_count'] ?? 0;
                       <?= htmlspecialchars($r['doctor_name'] ?? '—') ?>
                     </div>
                   </td>
+                  <?php if ($canSeeAll): ?>
+                  <td>
+                    <span class="badge bg-secondary opacity-75"><?= htmlspecialchars($clinicMap[$r['clinic']] ?? $r['clinic']) ?></span>
+                  </td>
+                  <?php endif; ?>
                   <td>
                     <i class="fas fa-clock text-muted me-1"></i>
-                    <?= htmlspecialchars($r['start_time']) ?> - <?= htmlspecialchars($r['end_time']) ?>
+                    <?= htmlspecialchars(substr($r['start_time'], 0, 5)) ?> - <?= htmlspecialchars(substr($r['end_time'], 0, 5)) ?>
                   </td>
-                  <td><strong><?= htmlspecialchars($r['patient_name']) ?></strong></td>
+                  <td>
+                    <a href="patient_history.php?phone=<?= urlencode($r['phone']) ?>" class="text-decoration-none fw-bold" title="Түүх харах">
+                      <?= htmlspecialchars($r['patient_name']) ?>
+                    </a>
+                  </td>
                   <td>
                     <?php if (!empty($r['service_name'])): ?>
                       <span class="service-badge"><?= htmlspecialchars($r['service_name']) ?></span>
@@ -856,7 +1088,8 @@ $cancelledCount = $statuses['cancelled_count'] ?? 0;
                         'online' => ['Онлайн', 'status-online', 'fa-globe'],
                         'arrived' => ['Ирсэн', 'status-arrived', 'fa-user-check'],
                         'paid' => ['Төлөгдсөн', 'status-paid', 'fa-check-circle'],
-                        'cancelled' => ['Цуцалсан', 'status-cancelled', 'fa-times-circle']
+                        'cancelled' => ['Үйлчлүүлэгч цуцалсан', 'status-cancelled', 'fa-times-circle'],
+                        'doctor_cancelled' => ['Эмч цуцалсан', 'status-doctor-cancelled', 'fa-user-slash']
                       ];
                       $st = $statusLabels[$r['status']] ?? ['Тодорхойгүй', 'status-pending', 'fa-question'];
                     ?>
@@ -936,23 +1169,23 @@ $cancelledCount = $statuses['cancelled_count'] ?? 0;
           </div>
           <div class="mb-3">
             <label class="form-label">Огноо <span class="text-danger">*</span></label>
-            <input type="date" name="date" class="form-control" required>
+            <input type="text" name="date" class="form-control date-picker" required>
           </div>
           <div class="row">
             <div class="col-6 mb-3">
               <label class="form-label">Эхлэх <span class="text-danger">*</span></label>
-              <input type="time" name="start_time" class="form-control" required>
+              <input type="time" name="start_time" class="form-control" id="addStartTime" required>
             </div>
             <div class="col-6 mb-3">
               <label class="form-label">Дуусах <span class="text-danger">*</span></label>
-              <input type="time" name="end_time" class="form-control" required>
+              <input type="time" name="end_time" class="form-control" id="addEndTime" required>
             </div>
           </div>
           <div class="row">
             <div class="col-md-6 mb-3">
-              <label class="form-label">Эмч</label>
-              <select name="doctor_id" class="form-select">
-                <option value="0">— Эмч сонгоогүй —</option>
+              <label class="form-label">Эмч <span class="text-danger">*</span></label>
+              <select name="doctor_id" class="form-select" required>
+                <option value="">— Эмч сонгоно уу —</option>
                 <?php foreach ($doctors as $doc): ?>
                   <option value="<?= $doc['id'] ?>"><?= htmlspecialchars($doc['name']) ?></option>
                 <?php endforeach; ?>
@@ -964,9 +1197,9 @@ $cancelledCount = $statuses['cancelled_count'] ?? 0;
                 <option value="pending">Хүлээгдэж буй</option>
                 <option value="online">Онлайн</option>
                 <option value="arrived">Ирсэн</option>
-                <option value="paid">Төлөгдсөн</option>
-                <option value="cancelled">Цуцалсан</option>
-              </select>
+                <option value="cancelled">Үйлчлүүлэгч цуцалсан</option>
+                <option value="doctor_cancelled">Эмч цуцалсан</option>
+                  </select>
             </div>
           </div>
         </div>
@@ -1021,36 +1254,37 @@ $cancelledCount = $statuses['cancelled_count'] ?? 0;
           </div>
           <div class="mb-3">
             <label class="form-label">Огноо <span class="text-danger">*</span></label>
-            <input type="date" name="date" class="form-control" required>
+            <input type="text" name="date" class="form-control date-picker" required>
           </div>
           <div class="row">
             <div class="col-6 mb-3">
               <label class="form-label">Эхлэх <span class="text-danger">*</span></label>
-              <input type="time" name="start_time" class="form-control" required>
+              <input type="time" name="start_time" class="form-control" id="editStartTime" required>
             </div>
             <div class="col-6 mb-3">
               <label class="form-label">Дуусах <span class="text-danger">*</span></label>
-              <input type="time" name="end_time" class="form-control" required>
+              <input type="time" name="end_time" class="form-control" id="editEndTime" required>
             </div>
           </div>
           <div class="row">
-            <div class="col-md-6 mb-3">
-              <label class="form-label">Эмч</label>
-              <select name="doctor_id" class="form-select">
-                <option value="0">— Эмч сонгоогүй —</option>
+            <div class="col-md-6 mb-3" id="editDoctorField">
+              <label class="form-label">Эмч <span class="text-danger">*</span></label>
+              <select name="doctor_id" class="form-select" required>
+                <option value="">— Эмч сонгоно уу —</option>
                 <?php foreach ($doctors as $doc): ?>
                   <option value="<?= $doc['id'] ?>"><?= htmlspecialchars($doc['name']) ?></option>
                 <?php endforeach; ?>
               </select>
             </div>
-            <div class="col-md-6 mb-3">
+            <div id="editStatusCol" class="col-md-6 mb-3">
               <label class="form-label">Статус</label>
-              <select name="status" class="form-select">
+              <select name="status" class="form-select" id="editStatusSelect">
                 <option value="pending">Хүлээгдэж буй</option>
                 <option value="online">Онлайн</option>
                 <option value="arrived">Ирсэн</option>
                 <option value="paid">Төлөгдсөн</option>
-                <option value="cancelled">Цуцалсан</option>
+                <option value="cancelled">Үйлчлүүлэгч цуцалсан</option>
+                <option value="doctor_cancelled">Эмч цуцалсан</option>
               </select>
             </div>
           </div>
@@ -1067,17 +1301,70 @@ $cancelledCount = $statuses['cancelled_count'] ?? 0;
     </div>
   </div>
 
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/flatpickr/dist/flatpickr.min.css">
+  <script src="https://cdn.jsdelivr.net/npm/flatpickr"></script>
   <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"></script>
   <script>
     const addModal = new bootstrap.Modal(document.getElementById('addModal'));
     const editModal = new bootstrap.Modal(document.getElementById('editModal'));
 
-    document.getElementById('addBtn').addEventListener('click', () => {
-      document.getElementById('addForm').reset();
-      // Set default date to today
-      document.querySelector('#addForm input[name="date"]').value = new Date().toISOString().split('T')[0];
-      addModal.show();
+    const addBtn = document.getElementById('addBtn');
+    if (addBtn) {
+      addBtn.addEventListener('click', () => {
+        document.getElementById('addForm').reset();
+        // Set default date to today
+        const today = new Date().toISOString().split('T')[0];
+        const dateInput = document.querySelector('#addForm input[name="date"]');
+        if (dateInput._flatpickr) {
+            dateInput._flatpickr.setDate(today);
+        } else {
+            dateInput.value = today;
+        }
+        addModal.show();
+      });
+    }
+
+    // Initialize Flatpickr for all date inputs
+    document.addEventListener('DOMContentLoaded', function() {
+        flatpickr('.date-picker', {
+            dateFormat: "Y-m-d",
+            allowInput: true,
+            monthSelectorType: "dropdown",
+            locale: {
+                firstDayOfWeek: 1
+            }
+        });
+        
+        // Target specifically the filter date if it's there
+        const filterDate = document.querySelector('input[name="filter_date"]');
+        if (filterDate) {
+          flatpickr(filterDate, {
+              dateFormat: "Y-m-d",
+              allowInput: true,
+              locale: { firstDayOfWeek: 1 }
+          });
+        }
     });
+
+    // Эхлэх цаг оруулахад автоматаар 30 минут нэмж дуусах цагийг тооцох
+    function addThirtyMinutes(timeString) {
+      if (!timeString) return '';
+      const [hours, minutes] = timeString.split(':').map(Number);
+      const date = new Date();
+      date.setHours(hours);
+      date.setMinutes(minutes + 30);
+      return date.toTimeString().slice(0, 5);
+    }
+
+    const addStartTimeInput = document.getElementById('addStartTime');
+    if (addStartTimeInput) {
+      addStartTimeInput.addEventListener('change', function() {
+        const endTimeInput = document.getElementById('addEndTime');
+        if (endTimeInput && this.value) {
+          endTimeInput.value = addThirtyMinutes(this.value);
+        }
+      });
+    }
 
     document.getElementById('addForm').addEventListener('submit', async e => {
       e.preventDefault();
@@ -1095,6 +1382,15 @@ $cancelledCount = $statuses['cancelled_count'] ?? 0;
         return;
       }
 
+      const doctorId = parseInt(f.querySelector('select[name="doctor_id"]').value) || 0;
+      if (!doctorId) {
+        showToast('Эмч сонгоно уу', 'warning');
+        f.querySelector('select[name="doctor_id"]').focus();
+        btn.disabled = false;
+        btn.innerHTML = '<i class="fas fa-check me-1"></i>Хадгалах';
+        return;
+      }
+
       const payload = {
         action: 'add',
         patient_name: f.querySelector('input[name="patient_name"]').value,
@@ -1105,7 +1401,7 @@ $cancelledCount = $statuses['cancelled_count'] ?? 0;
         date: f.querySelector('input[name="date"]').value,
         start_time: f.querySelector('input[name="start_time"]').value,
         end_time: f.querySelector('input[name="end_time"]').value,
-        doctor_id: parseInt(f.querySelector('select[name="doctor_id"]').value) || 0,
+        doctor_id: doctorId,
         status: f.querySelector('select[name="status"]').value,
         visit_count: parseInt(f.querySelector('input[name="visit_count"]') ? f.querySelector('input[name="visit_count"]').value : 1) || 1
       };
@@ -1132,6 +1428,18 @@ $cancelledCount = $statuses['cancelled_count'] ?? 0;
       }
     });
 
+    // Засах модал дээр эмч талбарыг үргэлж харуулж, байрлал зөв байлгах
+    function toggleDoctorField() {
+      const doctorField = document.getElementById('editDoctorField');
+      const statusCol = document.getElementById('editStatusCol');
+      if (doctorField && statusCol) {
+        doctorField.style.display = 'block';
+        doctorField.classList.add('col-md-6', 'mb-3');
+        statusCol.classList.add('col-md-6', 'mb-3');
+        statusCol.classList.remove('col-md-12');
+      }
+    }
+
     document.querySelectorAll('.edit-btn').forEach(btn => {
       btn.addEventListener('click', () => {
         document.querySelector('#editForm input[name="id"]').value = btn.dataset.id;
@@ -1146,9 +1454,30 @@ $cancelledCount = $statuses['cancelled_count'] ?? 0;
         document.querySelector('#editForm input[name="service_name"]').value = btn.dataset.service || '';
         document.querySelector('#editForm textarea[name="note"]').value = btn.dataset.note || '';
         if (document.querySelector('#editForm input[name="visit_count"]')) document.querySelector('#editForm input[name="visit_count"]').value = btn.dataset.visit_count || 1;
+        
+        // Эмч талбарыг тогтмол харуулах
+        setTimeout(toggleDoctorField, 50);
+        
         editModal.show();
       });
     });
+    
+    // Засах модал дээр эхлэх цаг өөрчлөгдөхөд 30 минут нэмэх
+    const editStartTimeInput = document.getElementById('editStartTime');
+    if (editStartTimeInput) {
+      editStartTimeInput.addEventListener('change', function() {
+        const endTimeInput = document.getElementById('editEndTime');
+        if (endTimeInput && this.value) {
+          endTimeInput.value = addThirtyMinutes(this.value);
+        }
+      });
+    }
+    
+    // Статус өөрчлөгдөх үед эмч талбарыг шалгах
+    const editStatusSelect = document.getElementById('editStatusSelect');
+    if (editStatusSelect) {
+      editStatusSelect.addEventListener('change', toggleDoctorField);
+    }
 
     document.getElementById('editForm').addEventListener('submit', async e => {
       e.preventDefault();
@@ -1166,6 +1495,15 @@ $cancelledCount = $statuses['cancelled_count'] ?? 0;
         return;
       }
 
+      const doctorId = parseInt(f.querySelector('select[name="doctor_id"]').value) || 0;
+      if (!doctorId) {
+        showToast('Эмч сонгоно уу', 'warning');
+        f.querySelector('select[name="doctor_id"]').focus();
+        btn.disabled = false;
+        btn.innerHTML = '<i class="fas fa-save me-1"></i>Хадгалах';
+        return;
+      }
+
       const payload = {
         action: 'update',
         id: parseInt(f.querySelector('input[name="id"]').value),
@@ -1177,7 +1515,7 @@ $cancelledCount = $statuses['cancelled_count'] ?? 0;
         date: f.querySelector('input[name="date"]').value,
         start_time: f.querySelector('input[name="start_time"]').value,
         end_time: f.querySelector('input[name="end_time"]').value,
-        doctor_id: parseInt(f.querySelector('select[name="doctor_id"]').value) || 0,
+        doctor_id: doctorId,
         status: f.querySelector('select[name="status"]').value,
         visit_count: parseInt(f.querySelector('input[name="visit_count"]') ? f.querySelector('input[name="visit_count"]').value : 1) || 1
       };
@@ -1254,34 +1592,76 @@ $cancelledCount = $statuses['cancelled_count'] ?? 0;
 
     // 🔍 Фильтр функц
     function applyFilters() {
-      const patientFilter = document.getElementById('filterPatient').value.toLowerCase();
+      const patientFilter = document.getElementById('filterPatient').value.toLowerCase().trim();
       const dateFilter = document.getElementById('filterDate').value;
       const statusFilter = document.getElementById('filterStatus').value;
       const doctorFilter = document.getElementById('filterDoctor').value;
+      const clinicFilterEl = document.getElementById('filterClinic');
+      const clinicFilter = clinicFilterEl ? clinicFilterEl.value : '';
 
       const rows = document.querySelectorAll('#bookingsBody tr:not(.empty-row)');
       let visibleCount = 0;
+      const counts = { online: 0, arrived: 0, pending: 0, cancelled: 0 };
 
       rows.forEach(row => {
-        if (!row.dataset.date) return; // Skip non-data rows
+        if (!row.dataset.date) return;
         let show = true;
 
-        if (patientFilter && !row.dataset.patient.includes(patientFilter) && !(row.dataset.service || '').includes(patientFilter)) {
+        if (patientFilter) {
+          const patient = row.dataset.patient || '';
+          const service = row.dataset.service || '';
+          const phone = row.dataset.phone || '';
+          const doctor = row.dataset.doctorName || '';
+          
+          if (!patient.includes(patientFilter) && 
+              !service.includes(patientFilter) && 
+              !phone.includes(patientFilter) &&
+              !doctor.includes(patientFilter)) {
+            show = false;
+          }
+        }
+        
+        if (show && dateFilter && row.dataset.date !== dateFilter) {
           show = false;
         }
-        if (dateFilter && row.dataset.date !== dateFilter) {
+        if (show && statusFilter && row.dataset.status !== statusFilter) {
           show = false;
         }
-        if (statusFilter && row.dataset.status !== statusFilter) {
+        if (show && doctorFilter && row.dataset.doctor !== doctorFilter) {
           show = false;
         }
-        if (doctorFilter && row.dataset.doctor !== doctorFilter) {
+        if (show && clinicFilter && row.dataset.clinic !== clinicFilter) {
           show = false;
         }
 
         row.style.display = show ? '' : 'none';
-        if (show) visibleCount++;
+        if (show) {
+          visibleCount++;
+          const st = row.dataset.status;
+          if (st === 'online') counts.online++;
+          else if (st === 'arrived') counts.arrived++;
+          else if (st === 'pending') counts.pending++;
+          else if (st === 'cancelled') counts.cancelled++;
+        }
       });
+
+      // Update stats cards
+      const scOnline = document.querySelector('.stats-row .stat-card:nth-child(1) .number');
+      const scArrived = document.querySelector('.stats-row .stat-card:nth-child(2) .number');
+      const scPending = document.querySelector('.stats-row .stat-card:nth-child(3) .number');
+      const scCancelled = document.querySelector('.stats-row .stat-card:nth-child(4) .number');
+      
+      if (scOnline) scOnline.textContent = counts.online;
+      if (scArrived) scArrived.textContent = counts.arrived;
+      if (scPending) scPending.textContent = counts.pending;
+      if (scCancelled) scCancelled.textContent = counts.cancelled;
+
+      // Update total label
+      const subtitle = document.querySelector('.page-header .subtitle');
+      if (subtitle) {
+        const docCount = document.querySelectorAll('#filterDoctor option').length - 1;
+        subtitle.innerHTML = `<i class="fas fa-chart-line me-1"></i> Нийт <strong>${visibleCount}</strong> захиалга · <strong>${docCount}</strong> эмч`;
+      }
 
       // Show/hide empty state
       let emptyRow = document.querySelector('.empty-row');
@@ -1299,16 +1679,20 @@ $cancelledCount = $statuses['cancelled_count'] ?? 0;
     }
 
     // Фильтр events
-    document.getElementById('filterPatient').addEventListener('keyup', applyFilters);
+    document.getElementById('filterPatient').addEventListener('input', applyFilters);
     document.getElementById('filterDate').addEventListener('change', applyFilters);
     document.getElementById('filterStatus').addEventListener('change', applyFilters);
     document.getElementById('filterDoctor').addEventListener('change', applyFilters);
+    const fc = document.getElementById('filterClinic');
+    if (fc) fc.addEventListener('change', applyFilters);
 
     document.getElementById('clearFilter').addEventListener('click', () => {
       document.getElementById('filterPatient').value = '';
       document.getElementById('filterDate').value = '';
       document.getElementById('filterStatus').value = '';
       document.getElementById('filterDoctor').value = '';
+      const fc = document.getElementById('filterClinic');
+      if (fc) fc.value = '';
       applyFilters();
     });
 

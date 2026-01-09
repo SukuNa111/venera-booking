@@ -1,14 +1,16 @@
 # Venera-Dent Booking System
 FROM php:8.2-apache
 
-# Install PostgreSQL extension and GD library for image processing
+# Install PostgreSQL extension, GD library, cURL, and cron
 RUN apt-get update && apt-get install -y \
     libpq-dev \
     libpng-dev \
     libjpeg-dev \
     libfreetype6-dev \
+    curl \
+    cron \
     && docker-php-ext-configure gd --with-freetype --with-jpeg \
-    && docker-php-ext-install pdo pdo_pgsql gd \
+    && docker-php-ext-install pdo pdo_pgsql gd curl \
     && apt-get clean
 
 # Enable Apache mod_rewrite
@@ -29,5 +31,17 @@ COPY . /var/www/html/
 RUN chown -R www-data:www-data /var/www/html \
     && chmod -R 755 /var/www/html
 
+# Setup cron job for SMS sending (every 5 minutes)
+RUN echo '*/5 * * * * cd /var/www/html && php cron_sms.php >> /var/log/sms_cron.log 2>&1' > /etc/cron.d/sms-cron
+RUN chmod 0644 /etc/cron.d/sms-cron
+RUN crontab /etc/cron.d/sms-cron
+
+# Create a start script that runs both Apache and cron
+RUN echo '#!/bin/bash\ncron &\napache2-foreground' > /start.sh
+RUN chmod +x /start.sh
+
 # Expose port 80
 EXPOSE 80
+
+# Start both Apache and Cron
+CMD ["/start.sh"]

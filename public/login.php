@@ -50,37 +50,52 @@ function recordLoginAttempt($phone, $success = false) {
 if ($_SERVER['REQUEST_METHOD'] === 'POST') {
   $phone = trim($_POST['phone'] ?? '');
   $pin   = trim($_POST['pin'] ?? '');
+  $remember = isset($_POST['remember']);
   $phone_old = $phone;
-  
-  // Rate limit шалгах
-  $rateCheck = checkLoginAttempts($phone);
-  if ($rateCheck['blocked']) {
-    $error = "⏳ Хэт олон оролдлого. {$rateCheck['remaining']} минут хүлээнэ үү.";
-  } elseif ($phone === '' || $pin === '') {
-    $error = '📱 Утасны дугаар болон PIN заавал оруулна уу.';
+  // 8 оронтой эсэхийг шалгах
+  if (!preg_match('/^[0-9]{8}$/', $phone)) {
+    $error = '📱 8 оронтой утасны дугаар оруулна уу.';
   } else {
-    $st = db()->prepare("SELECT * FROM users WHERE phone=? LIMIT 1");
-    $st->execute([$phone]);
-    $u = $st->fetch();
-
-    if ($u && password_verify($pin, $u['pin_hash'])) {
-      recordLoginAttempt($phone, true); // Амжилттай - counter устгах
-      $_SESSION['uid']       = (int)$u['id'];
-      $_SESSION['name']      = $u['name'];
-      $_SESSION['role']      = $u['role'];
-      $_SESSION['clinic_id'] = $u['clinic_id'] ?? 'venera';
-      // Redirect based on role
-      if (isset($u['role']) && $u['role'] === 'doctor') {
-        header('Location: my_schedule.php');
-      } else {
-        header('Location: index.php');
-      }
-      exit;
+    // Rate limit шалгах
+    $rateCheck = checkLoginAttempts($phone);
+    if ($rateCheck['blocked']) {
+      $error = "⏳ Хэт олон оролдлого. {$rateCheck['remaining']} минут хүлээнэ үү.";
+    } elseif ($phone === '' || $pin === '') {
+      $error = '📱 Утасны дугаар болон PIN заавал оруулна уу.';
     } else {
-      recordLoginAttempt($phone, false); // Амжилтгүй - counter нэмэх
-      $error = '❌ Нэвтрэх мэдээлэл буруу байна.';
+      $st = db()->prepare("SELECT * FROM users WHERE phone=? LIMIT 1");
+      $st->execute([$phone]);
+      $u = $st->fetch();
+
+      if ($u && password_verify($pin, $u['pin_hash'])) {
+        recordLoginAttempt($phone, true); // Амжилттай - counter устгах
+        $_SESSION['uid']         = (int)$u['id'];
+        $_SESSION['name']        = $u['name'];
+        $_SESSION['role']        = $u['role'];
+        $_SESSION['clinic_id']   = $u['clinic_id'] ?? 'venera';
+        $_SESSION['department']  = $u['department'] ?? '';
+        // Remember me functionality
+        if ($remember) {
+          setcookie('remember_phone', $phone, time() + 60*60*24*30, '/');
+        } else {
+          setcookie('remember_phone', '', time() - 3600, '/');
+        }
+        // Redirect based on role
+        if (isset($u['role']) && $u['role'] === 'doctor') {
+          header('Location: my_schedule.php');
+        } else {
+          header('Location: index.php');
+        }
+        exit;
+      } else {
+        recordLoginAttempt($phone, false); // Амжилтгүй - counter нэмэх
+        $error = '❌ Нэвтрэх мэдээлэл буруу байна.';
+      }
     }
   }
+}
+elseif (!empty($_COOKIE['remember_phone'])) {
+  $phone_old = $_COOKIE['remember_phone'];
 }
 ?>
 <!doctype html>
@@ -95,7 +110,6 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
   <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.1/css/all.min.css">
   <style>
     * { margin: 0; padding: 0; box-sizing: border-box; }
-    
     body {
       font-family: 'Inter', system-ui, -apple-system, sans-serif;
       min-height: 100vh;
@@ -200,31 +214,33 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     }
     
     .login-header {
-      margin-bottom: 2.5rem;
+      margin-bottom: 2.2rem;
+      text-align: left;
     }
-    
     .login-header h2 {
-      font-size: 1.75rem;
-      font-weight: 600;
-      color: #f1f5f9;
-      margin-bottom: 0.5rem;
+      font-size: 2rem;
+      font-weight: 700;
+      color: #f3f4f6;
+      margin-bottom: 0.4rem;
+      letter-spacing: -0.5px;
     }
-    
     .login-header p {
-      color: #64748b;
-      font-size: 0.95rem;
+      color: #a1a1aa;
+      font-size: 1rem;
+      margin-bottom: 0;
     }
     
     .form-group {
-      margin-bottom: 1.5rem;
+      margin-bottom: 1.3rem;
     }
     
     .form-label {
       display: block;
-      color: #94a3b8;
-      font-size: 0.875rem;
+      color: #cbd5e1;
+      font-size: 0.93rem;
       font-weight: 500;
-      margin-bottom: 0.5rem;
+      margin-bottom: 0.45rem;
+      letter-spacing: 0.01em;
     }
     
     .input-wrapper {
@@ -242,20 +258,21 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     
     .form-input {
       width: 100%;
-      padding: 0.875rem 1rem 0.875rem 2.75rem;
-      background: rgba(30, 41, 59, 0.5);
-      border: 1px solid rgba(148, 163, 184, 0.1);
-      border-radius: 12px;
-      color: #f1f5f9;
-      font-size: 1rem;
-      transition: all 0.3s ease;
+      padding: 0.95rem 1.1rem 0.95rem 2.75rem;
+      background: rgba(30, 41, 59, 0.7);
+      border: 1.5px solid rgba(148, 163, 184, 0.13);
+      border-radius: 14px;
+      color: #f3f4f6;
+      font-size: 1.07rem;
+      transition: all 0.2s cubic-bezier(.4,0,.2,1);
+      box-shadow: 0 1.5px 4px 0 rgba(59,130,246,0.04);
     }
     
     .form-input:focus {
       outline: none;
-      border-color: #3b82f6;
-      background: rgba(30, 41, 59, 0.8);
-      box-shadow: 0 0 0 4px rgba(59, 130, 246, 0.1);
+      border-color: #60a5fa;
+      background: rgba(30, 41, 59, 0.92);
+      box-shadow: 0 0 0 3px rgba(59, 130, 246, 0.13);
     }
     
     .form-input::placeholder {
@@ -315,73 +332,73 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     
     .btn-login {
       width: 100%;
-      padding: 1rem;
-      background: linear-gradient(135deg, #3b82f6 0%, #2563eb 100%);
+      padding: 1.1rem;
+      background: linear-gradient(135deg, #2563eb 0%, #3b82f6 100%);
       border: none;
-      border-radius: 12px;
-      color: white;
-      font-size: 1rem;
-      font-weight: 600;
+      border-radius: 14px;
+      color: #fff;
+      font-size: 1.08rem;
+      font-weight: 700;
       cursor: pointer;
-      transition: all 0.3s ease;
+      transition: all 0.18s cubic-bezier(.4,0,.2,1);
       display: flex;
       align-items: center;
       justify-content: center;
       gap: 0.5rem;
+      box-shadow: 0 2px 8px 0 rgba(59,130,246,0.10);
+      letter-spacing: 0.01em;
     }
-    
     .btn-login:hover {
-      background: linear-gradient(135deg, #2563eb 0%, #1d4ed8 100%);
-      transform: translateY(-2px);
-      box-shadow: 0 10px 30px rgba(59, 130, 246, 0.3);
+      background: linear-gradient(135deg, #1d4ed8 0%, #2563eb 100%);
+      transform: translateY(-1.5px) scale(1.012);
+      box-shadow: 0 8px 24px rgba(59, 130, 246, 0.18);
     }
-    
     .btn-login:active {
-      transform: translateY(0);
+      transform: scale(0.99);
     }
     
     .alert-error {
-      background: rgba(239, 68, 68, 0.1);
-      border: 1px solid rgba(239, 68, 68, 0.2);
+      background: rgba(239, 68, 68, 0.13);
+      border: 1.5px solid rgba(239, 68, 68, 0.18);
       color: #fca5a5;
-      padding: 1rem;
-      border-radius: 12px;
+      padding: 1.05rem 1.1rem;
+      border-radius: 13px;
       margin-bottom: 1.5rem;
       display: flex;
       align-items: center;
       gap: 0.75rem;
-      font-size: 0.9rem;
+      font-size: 0.97rem;
+      box-shadow: 0 1.5px 4px 0 rgba(239,68,68,0.04);
     }
-    
     .alert-error i {
       color: #ef4444;
+      font-size: 1.15rem;
     }
     
     .divider {
       display: flex;
       align-items: center;
-      margin: 2rem 0;
-      color: #475569;
-      font-size: 0.8rem;
+      margin: 2rem 0 1.2rem 0;
+      color: #64748b;
+      font-size: 0.85rem;
     }
-    
     .divider::before,
     .divider::after {
       content: '';
       flex: 1;
       height: 1px;
-      background: rgba(148, 163, 184, 0.1);
+      background: rgba(148, 163, 184, 0.13);
     }
-    
     .divider span {
       padding: 0 1rem;
     }
     
     .footer-text {
       text-align: center;
-      color: #475569;
-      font-size: 0.8rem;
-      margin-top: 2rem;
+      color: #64748b;
+      font-size: 0.85rem;
+      margin-top: 2.2rem;
+      letter-spacing: 0.01em;
     }
     
     /* Mobile responsive */
@@ -408,8 +425,8 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
   <!-- Hero Section -->
   <div class="hero-section">
     <div class="hero-content">
-      <?php $loginLogo = __DIR__.'/assets/logo.png'; $loginLogoVer = file_exists($loginLogo) ? filemtime($loginLogo) : time(); ?>
-      <img src="assets/logo.png?v=<?= $loginLogoVer ?>" alt="NG AI" class="hero-logo">
+      <?php $loginLogo = __DIR__.'/assets/logo_flowlab.png'; $loginLogoVer = file_exists($loginLogo) ? filemtime($loginLogo) : time(); ?>
+      <img src="assets/logo_flowlab.png?v=<?= $loginLogoVer ?>" alt="FlowLab" class="hero-logo">
       <h1 class="hero-title">Захиалгын Систем</h1>
       <p class="hero-subtitle">
         Эмнэлгийн цаг захиалга, эмч нарын хуваарь, үйлчлүүлэгчийн мэдээллийг нэг дороос удирдах платформ
@@ -451,8 +468,10 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         <div class="input-wrapper">
           <i class="fas fa-phone"></i>
           <input type="tel" inputmode="numeric" pattern="[0-9]*" maxlength="12"
-                 class="form-input" name="phone" placeholder="99991234"
-                 value="<?= htmlspecialchars($phone_old) ?>" required autocomplete="tel">
+                 class="form-input" name="phone" id="phoneInput" placeholder="99991234"
+                 value="<?= htmlspecialchars($phone_old) ?>" required autocomplete="tel"
+                 pattern="[0-9]{8}" maxlength="8" minlength="8"
+                 title="8 оронтой утасны дугаар оруулна уу">
         </div>
       </div>
 
@@ -470,7 +489,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
 
       <div class="form-options">
         <label class="remember-me">
-          <input type="checkbox" id="remember">
+          <input type="checkbox" id="remember" name="remember" <?= !empty($_COOKIE['remember_phone']) ? 'checked' : '' ?>>
           <span>Намайг сана</span>
         </label>
         <a href="#" class="forgot-link" onclick="alert('Админ руу хандана уу.');return false;">
@@ -489,11 +508,19 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     </div>
 
     <div class="footer-text">
-      © <?= date('Y') ?> flowlabs. Бүх эрх хуулиар хамгаалагдсан.
+      © <?= date('Y') ?> Flowlab. Бүх эрх хуулиар хамгаалагдсан.
     </div>
   </div>
 
   <script>
+        // Limit phone input to 8 digits only
+        document.addEventListener('DOMContentLoaded', function() {
+          var phoneInput = document.getElementById('phoneInput');
+          phoneInput.addEventListener('input', function() {
+            // Remove non-digits and trim to 8 digits
+            this.value = this.value.replace(/\D/g, '').slice(0, 8);
+          });
+        });
     // PIN show/hide toggle
     document.getElementById('togglePin').addEventListener('click', function() {
       const input = document.getElementById('pinInput');

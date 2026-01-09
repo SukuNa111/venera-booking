@@ -33,4 +33,4 @@ http://localhost/booking/public/
 - working_hours хүснэгт нэмсэн (doctor_id, day_of_week, start_time, end_time)
 
 ````
-1WSHQ4E2LZLSVQJNE2PWRHWH
+1WSHQ4E2LZLSVQJNE2PWRHWH![alt text](image.png)
